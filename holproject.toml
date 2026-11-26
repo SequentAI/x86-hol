@@ -1,0 +1,18 @@
+[holbuild]
+minimum_version = "0.12.0"
+
+[project]
+name = "x86-hol"
+version = "0.1.0"
+
+[build]
+roots = ["x86HolScript.sml"]
+
+[dependencies.hol]
+git = "https://github.com/HOL-Theorem-Prover/HOL.git"
+rev = "b818ed18c69ae82e18faecb4bd8a8c8f31f9ce14"
+
+[dependencies.holexamples]
+from = "hol"
+path = "."
+manifest = "holexamples.manifest.toml"

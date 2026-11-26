@@ -1,0 +1,45 @@
+# x86-hol
+
+An executable HOL4 model of x86-64 user-space instructions. It covers
+a subset of integer, SIMD and cryptographic instructions and rejects
+unsupported encodings.
+
+`x86Isa` defines instruction decoding and execution over a storage
+interface. Its state includes general-purpose and XMM registers, the
+instruction pointer, six boolean status flags, and byte-addressed memory
+with read, write and execute permissions. Each step takes its undefined
+flag values from an indexed stream. `x86IsaCv` instantiates the model
+with sparse trees, translates it with `cv_trans` for `cv_eval`, and
+proves that the executable step refines the functional model.
+
+The conformance theories check decoded instructions and their lengths
+against `llvm-objdump`, and check execution and fault outcomes against
+observations from x86-64 hardware. `x86UndefinedFlags` records an audit
+of undefined flag writes against [s2n-bignum](https://github.com/awslabs/s2n-bignum/blob/main/x86/proofs/x86.ml)
+and the Intel instruction set reference.
+
+## Build
+
+With Poly/ML and holbuild on `PATH`, run
+
+```sh
+holbuild buildhol
+holbuild -j4 build x86HolTheory
+holbuild check
+```
+
+To reproduce the observations, use x86-64 Linux with a C compiler and
+a CPU supporting the instructions under test. Install `python-zig`
+(`pipx install ziglang==0.17.0`) and put `llvm-objdump` on `PATH`.
+CI uses the `llvm-tools` component of Rust 1.99.1.
+
+```sh
+python3 tests/generate_decode.py --check
+python3 tests/generate_exec.py --check
+```
+
+Omit `--check` to regenerate the case theories.
+
+## License
+
+[BSD 3-Clause](LICENSE).

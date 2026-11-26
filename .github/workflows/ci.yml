@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  holbuild:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-polyml
+
+      - uses: ./.github/actions/setup-holbuild
+        with:
+          holbuild-ref: v0.15.12
+
+      - name: Build and check HOL theories
+        run: |
+          holbuild buildhol
+          holbuild -j4 build x86HolTheory
+          holbuild check x86HolTheory x86IsaTheory x86IsaCvTheory x86AesTheory \
+            x86DecodeCasesTheory x86DecodeTestTheory x86ExecCasesTheory \
+            x86ExecTestTheory x86UndefinedFlagsTheory
+
+  native:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Zig and llvm-objdump
+        run: |
+          pipx install ziglang==0.17.0
+          rustup toolchain install 1.99.1 --profile minimal --component llvm-tools
+          echo "$(rustc +1.99.1 --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin" >> "$GITHUB_PATH"
+
+      - name: Check instruction decoding against LLVM
+        run: python3 tests/generate_decode.py --check
+
+      - name: Check instruction execution on x86-64 hardware
+        run: python3 tests/generate_exec.py --check
