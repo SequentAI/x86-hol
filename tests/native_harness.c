@@ -7,7 +7,7 @@
    filled with 0xCC) or fault. Prints one line per case:
      reached <rip> <rax> ... <r15> <flags> <xmm0> ... <xmm15> <data> <stack>
      fault fetch|load|store|divide|alignment <data> <stack>
-   in hex, where rip is the int3's address, flags keeps CF PF AF ZF SF OF,
+   in hex, where rip is the int3's address, flags keeps CF PF AF ZF SF DF OF,
    data is the DATA_SIZE bytes at DATA_BASE and stack the STACK_WINDOW bytes
    at the top of the stack page, where the case stopped. */
 #define _GNU_SOURCE
@@ -24,7 +24,8 @@
 #define CODE_BASE 0x100000UL
 #define DATA_BASE 0x200000UL
 #define STACK_BASE 0x300000UL
-#define FLAG_MASK 0x8d5UL
+#define FLAG_MASK 0x8d5UL /* CF PF AF ZF SF OF: the flags a case sets */
+#define OUTCOME_MASK 0xcd5UL /* and DF: the flags an outcome records */
 #define DATA_SIZE 256
 #define STACK_WINDOW 128
 
@@ -168,7 +169,7 @@ int main(void) {
       printf("reached %llx", (unsigned long long)(rip - 1));
       for (int i = 0; i < 16; i++)
         printf(" %llx", (unsigned long long)caught_context.gregs[order[i]]);
-      printf(" %llx", (unsigned long long)(caught_context.gregs[REG_EFL] & FLAG_MASK));
+      printf(" %llx", (unsigned long long)(caught_context.gregs[REG_EFL] & OUTCOME_MASK));
       for (int i = 0; i < 16; i++) {
         const uint32_t *lanes = caught_xmm[i].element;
         printf(" %08x%08x%08x%08x", lanes[3], lanes[2], lanes[1], lanes[0]);
@@ -179,7 +180,7 @@ int main(void) {
       uint64_t error = (uint64_t)caught_context.gregs[REG_ERR];
       printf("fault %s", error & 16 ? "fetch" : error & 2 ? "store" : "load");
     } else if (caught_signal == SIGSEGV && caught_context.gregs[REG_TRAPNO] == 13) {
-      printf("fault alignment"); /* the #GP of a misaligned legacy SIMD read */
+      printf("fault alignment"); /* the #GP of a misaligned legacy SIMD read or CMPXCHG16B */
     } else if (caught_signal == SIGFPE && caught_context.gregs[REG_TRAPNO] == 0) {
       printf("fault divide"); /* the divide error (#DE) of DIV and IDIV */
     } else {

@@ -16,13 +16,6 @@ Definition flags_of_word_def:
        ZF := word_bit 6 w; SF := word_bit 7 w; OF := word_bit 11 w |>
 End
 
-Definition word_of_flags_def:
-  word_of_flags f : word64 =
-    (if f.CF then 0x1w else 0w) || (if f.PF then 0x4w else 0w) ||
-    (if f.AF then 0x10w else 0w) || (if f.ZF then 0x40w else 0w) ||
-    (if f.SF then 0x80w else 0w) || (if f.OF then 0x800w else 0w)
-End
-
 Definition put_many_def:
   put_many (address:num) [] tree = tree ∧
   put_many address (value::values) tree =
@@ -70,7 +63,7 @@ End
 
 Definition test_state_def:
   test_state code ((entry, regs, xmm, flags, data, ret, data_perm, stack_perm) : exec_input) =
-    x86_machine (put_many 0 regs LN) (put_many 0 xmm LN) entry (flags_of_word flags)
+    x86_machine (put_many 0 regs LN) (put_many 0 xmm LN) entry (flags_of_word flags) F
       (test_mem code data ret) (test_perms data_perm stack_perm) : finite_state
 End
 
@@ -106,7 +99,7 @@ Definition agrees_def:
       Reached rip regs xmm flags mask =>
         (case run_to rip fuel (flags_of_word flags) (test_state code input) of
            (NONE, t) => read_regs 16 0 t.regs = regs ∧ read_xmms 16 0 t.xmm = xmm ∧
-                        word_of_flags t.flags && mask = flags ∧
+                        flags_word t.flags t.df && mask = flags ∧
                         windows_agree data stack t
          | (SOME _, _) => F)
     | Faulted k =>
@@ -117,6 +110,7 @@ End
 
 val () = cv_auto_trans agrees_def;
 
+(* The case's name if the model disagrees with it. *)
 fun check i =
   let
     val name = "exec_case_" ^ Int.toString i
@@ -124,12 +118,16 @@ fun check i =
     val result = cv_eval (mk_comb (``agrees``, rhs (concl def)))
   in
     if aconv (rhs (concl result)) T then
-      ignore (save_thm (name ^ "_agrees", EQT_ELIM (PURE_REWRITE_RULE [GSYM def] result)))
-    else raise Fail (name ^ ": the model disagrees with the observed outcome")
+      (save_thm (name ^ "_agrees", EQT_ELIM (PURE_REWRITE_RULE [GSYM def] result)); NONE)
+    else SOME name
   end;
 
 val count = numSyntax.int_of_term (rhs (concl exec_case_count_def));
-val () = List.app check (List.tabulate (count, I));
+val () =
+  case List.mapPartial check (List.tabulate (count, I)) of
+    [] => ()
+  | names => raise Fail ("the model disagrees with the observed outcome of " ^
+                         String.concatWith ", " names)
 
 (* Fail-closed cases hardware can't show with the harness's fixed pages. *)
 Definition place_def:
@@ -167,7 +165,7 @@ val () = check_fault "fetch_rejects_writable_code"
 (* xor eax, eax straddling the end of the code page *)
 val () = check_fault "fetch_rejects_instruction_past_code"
   ``set_rip 0x100FFFw (place 0x100FFF [0x31w; 0xC0w] ^start)`` ``Fetch``;
-(* 31 then 00, an unmodelled xor to memory if the second byte were fetched *)
+(* 31 then 00, a xor to memory if the second byte were fetched *)
 val () = check_fault "fetch_rejects_undecodable_instruction_past_code"
   ``set_rip 0x100FFFw (place 0x100FFF [0x31w; 0x00w] ^start)`` ``Fetch``;
 (* ud2 *)
@@ -180,11 +178,11 @@ val () = check_fault "prefixes_past_length_limit_are_unsupported"
 val () = check_fault "unmodelled_opcode_at_end_of_code_is_unsupported"
   ``set_rip 0x100FFEw (place 0x100FFE [0x0Fw; 0x0Bw] ^start)`` ``Unsupported``;
 (* nops RIP-relative and without base cut short by the end of the code
-   page: rejected from the bytes there, not fetched further *)
-val () = check_fault "nop_rip_relative_at_end_of_code_is_unsupported"
-  ``set_rip 0x100FFDw (place 0x100FFD [0x0Fw; 0x1Fw; 0x05w] ^start)`` ``Unsupported``;
-val () = check_fault "nop_without_base_at_end_of_code_is_unsupported"
-  ``set_rip 0x100FFCw (place 0x100FFC [0x0Fw; 0x1Fw; 0x04w; 0x25w] ^start)`` ``Unsupported``;
+   page: their displacements lie past it, so the step faults on the fetch *)
+val () = check_fault "nop_rip_relative_at_end_of_code_is_truncated"
+  ``set_rip 0x100FFDw (place 0x100FFD [0x0Fw; 0x1Fw; 0x05w] ^start)`` ``Fetch``;
+val () = check_fault "nop_without_base_at_end_of_code_is_truncated"
+  ``set_rip 0x100FFCw (place 0x100FFC [0x0Fw; 0x1Fw; 0x04w; 0x25w] ^start)`` ``Fetch``;
 (* 66, a REX byte and 0F at the end of the code page: the next byte decides
    between an SSE2 form (66 44 0F EF C1, pxor) and a rejected one, so the
    step faults on the fetch. *)
@@ -198,15 +196,15 @@ val () = check_fault "sse_prefix_rex_w_0f_at_end_of_code_is_truncated"
    tzcnt) and a rejected form, so the step faults on the fetch. *)
 val () = check_fault "f3_rex_w_0f_at_end_of_code_is_truncated"
   ``set_rip 0x100FFDw (place 0x100FFD [0xF3w; 0x48w; 0x0Fw] ^start)`` ``Fetch``;
-(* Prefixes no opcode can complete at the end of the code page: F3 with
-   another legacy prefix. *)
-val () = check_fault "f3_66_at_end_of_code_is_unsupported"
-  ``set_rip 0x100FFEw (place 0x100FFE [0xF3w; 0x66w] ^start)`` ``Unsupported``;
-val () = check_fault "two_e_f3_at_end_of_code_is_unsupported"
-  ``set_rip 0x100FFEw (place 0x100FFE [0x2Ew; 0xF3w] ^start)`` ``Unsupported``;
-(* REX.W 81: only 81 /6 at 32 bits is modelled. *)
-val () = check_fault "rex_w_81_at_end_of_code_is_unsupported"
-  ``set_rip 0x100FFEw (place 0x100FFE [0x48w; 0x81w] ^start)`` ``Unsupported``;
+(* F3 with another legacy prefix, and REX.W 81, at the end of the code
+   page: an opcode can still complete them (66 F3 0F BC, tzcnt; REX.W 81
+   /r id), so the step faults on the fetch. *)
+val () = check_fault "f3_66_at_end_of_code_is_truncated"
+  ``set_rip 0x100FFEw (place 0x100FFE [0xF3w; 0x66w] ^start)`` ``Fetch``;
+val () = check_fault "two_e_f3_at_end_of_code_is_truncated"
+  ``set_rip 0x100FFEw (place 0x100FFE [0x2Ew; 0xF3w] ^start)`` ``Fetch``;
+val () = check_fault "rex_w_81_at_end_of_code_is_truncated"
+  ``set_rip 0x100FFEw (place 0x100FFE [0x48w; 0x81w] ^start)`` ``Fetch``;
 (* Prefixes an opcode can still complete: the step faults on the fetch. *)
 val () = check_fault "f3_at_end_of_code_is_truncated"
   ``set_rip 0x100FFFw (place 0x100FFF [0xF3w] ^start)`` ``Fetch``;
@@ -218,19 +216,23 @@ val () = check_fault "sse_prefix_rex_w_at_end_of_code_is_truncated"
   ``set_rip 0x100FFEw (place 0x100FFE [0x66w; 0x48w] ^start)`` ``Fetch``;
 val () = check_fault "nop_prefixes_at_end_of_code_is_truncated"
   ``set_rip 0x100FFEw (place 0x100FFE [0x66w; 0x2Ew] ^start)`` ``Fetch``;
-val () = check_fault "nop_group_digit_1_at_end_of_code_is_unsupported"
-  ``set_rip 0x100FFDw (place 0x100FFD [0x0Fw; 0x1Fw; 0x48w] ^start)`` ``Unsupported``;
-(* register-only forms (xor r/m32, r32; shl r/m32, cl; and r/m32, imm8)
-   with a memory ModRM byte, and mov m8, r8 with AH..BH as source, at the
-   end of the code page: rejected from that byte, not fetched further *)
-val () = check_fault "register_only_xor_at_end_of_code_is_unsupported"
-  ``set_rip 0x100FFEw (place 0x100FFE [0x31w; 0x05w] ^start)`` ``Unsupported``;
-val () = check_fault "register_only_shift_at_end_of_code_is_unsupported"
-  ``set_rip 0x100FFEw (place 0x100FFE [0xD3w; 0x25w] ^start)`` ``Unsupported``;
-val () = check_fault "register_only_and_imm_at_end_of_code_is_unsupported"
-  ``set_rip 0x100FFEw (place 0x100FFE [0x83w; 0x25w] ^start)`` ``Unsupported``;
-val () = check_fault "byte_store_from_ah_at_end_of_code_is_unsupported"
-  ``set_rip 0x100FFEw (place 0x100FFE [0x88w; 0x25w] ^start)`` ``Unsupported``;
+val () = check_fault "nop_group_digit_1_at_end_of_code_is_truncated"
+  ``set_rip 0x100FFDw (place 0x100FFD [0x0Fw; 0x1Fw; 0x48w] ^start)`` ``Fetch``;
+(* xor r/m32, r32; shl r/m32, cl; and r/m32, imm8; and mov m8, ah, each
+   with a RIP-relative ModRM byte at the end of the code page: the
+   displacement lies past it, so the step faults on the fetch *)
+val () = check_fault "xor_to_memory_at_end_of_code_is_truncated"
+  ``set_rip 0x100FFEw (place 0x100FFE [0x31w; 0x05w] ^start)`` ``Fetch``;
+val () = check_fault "shift_of_memory_at_end_of_code_is_truncated"
+  ``set_rip 0x100FFEw (place 0x100FFE [0xD3w; 0x25w] ^start)`` ``Fetch``;
+val () = check_fault "and_imm_to_memory_at_end_of_code_is_truncated"
+  ``set_rip 0x100FFEw (place 0x100FFE [0x83w; 0x25w] ^start)`` ``Fetch``;
+val () = check_fault "byte_store_from_ah_at_end_of_code_is_truncated"
+  ``set_rip 0x100FFEw (place 0x100FFE [0x88w; 0x25w] ^start)`` ``Fetch``;
+(* F2 and F3 together, which no opcode completes, at the end of the code
+   page: rejected from the bytes there, not fetched further *)
+val () = check_fault "f2_f3_at_end_of_code_is_unsupported"
+  ``set_rip 0x100FFEw (place 0x100FFE [0xF2w; 0xF3w] ^start)`` ``Unsupported``;
 (* mov %eax, 0xffefa(%rip), a store to 0x200000, with that byte readable,
    writable and executable: the model denies stores to executable memory. *)
 val () = check_fault "store_rejects_executable_memory"
@@ -246,3 +248,10 @@ val () = check_fault "store_rejects_unreadable_memory"
 val () = check_fault "store128_rejects_executable_last_byte"
   ``set_perm 0x20000F (perm T T T)
       (place 0x100100 [0x0Fw; 0x11w; 0x05w; 0xF9w; 0xFEw; 0x0Fw; 0x00w] ^start)`` ``Store``;
+(* enter $0x10, $0 with RSP 0x300008: pushing RBP to 0x300000 succeeds, but
+   the final RSP 0x2FFFF0 is unmapped, and ENTER faults if a write there
+   would (QEMU doesn't check, so no generated case shows this). *)
+val () = check_fault "enter_rejects_unwritable_final_rsp"
+  ``test_state [0xC8w; 0x10w; 0x00w; 0x00w]
+      (0x100100w, 0w::0w::0w::0w::0x300008w::REPLICATE 11 0w, REPLICATE 16 0w, 0w, [], 0w,
+       perm T T F, perm T T F)`` ``Store``;

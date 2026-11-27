@@ -21,6 +21,7 @@ Datatype:
     xmm : 'x;
     rip : word64;
     flags : eflags;
+    df : bool;
     mem : 'm;
     perms : 'p
   |>
@@ -69,6 +70,36 @@ Datatype:
   shift = SHL | SHR | SAR
 End
 
+(* RCL and RCR rotate through CF. *)
+Datatype:
+  rotate = ROL | ROR | RCL | RCR
+End
+
+(* BT copies a bit to CF; BTS, BTR and BTC also set, reset or complement it. *)
+Datatype:
+  bt = BT | BTS | BTR | BTC
+End
+
+(* LOOP, LOOPE and LOOPNE decrement RCX and branch while it is not 0 (and ZF
+   is set, or clear); JRCXZ branches when RCX is 0. *)
+Datatype:
+  loop = LOOP | LOOPE | LOOPNE | JRCXZ
+End
+
+Datatype:
+  strop = MOVS | CMPS | STOS | LODS | SCAS
+End
+
+(* No repeat prefix; REP or REPE (F3, and F2 before MOVS, STOS and LODS);
+   REPNE (F2 before CMPS and SCAS). *)
+Datatype:
+  rep = NoRep | RepE | RepNE
+End
+
+Datatype:
+  flagop = CLC | STC | CMC | CLD | STD
+End
+
 Datatype:
   bitcount = TZCNT | LZCNT | POPCNT
 End
@@ -96,66 +127,83 @@ Datatype:
   address = Mem (word4 option) (word4 option) word2 word64 | RipRel word64
 End
 
+(* RmHigh r: AH, CH, DH or BH, bits 15:8 of register r (0..3), named by
+   register numbers 4..7 of a byte operand without a REX prefix. *)
 Datatype:
-  rm = RmReg word4 | RmMem address
+  rm = RmReg word4 | RmHigh word2 | RmMem address
 End
 
-(* Binop, Mov and Cmov take the destination first, as do the SSE2 forms
-   VecLoad to Movd. Byte-register operands are the low bytes of registers
-   0..15 (AH..BH are not modelled). *)
+(* Instructions take the destination first. A size is the operand size:
+   S8 for byte forms, S16 with a 66 prefix, S64 with REX.W, S32 otherwise
+   (S64 by default for stack and branch operands). Immediates are held
+   sign-extended to 64 bits. *)
 Datatype:
   x86_instr =
-    MovImm word4 word32                 (* B8+r id: MOV r32, imm32 *)
-  | MovImm64 word4 word64               (* REX.W C7 /0 id: MOV r64, imm32 sign-extended;
-                                           REX.W B8+r io: MOV r64, imm64 *)
-  | Mov size rm rm                      (* 88, 89, 8B /r *)
-  | Binop binop size rm rm              (* 01 03 09 13 1B 21 28 2B 30 31 33 38 39 84 85 /r *)
-  | BinopImm binop size rm word64       (* 83 /0 /3 /4 /7 ib; 0D id: OR EAX, imm32;
-                                           81 /6 id: XOR r32, imm32; 80 /7 ib: CMP r8, imm8 *)
-  | Movzx size word4 rm                 (* 0F B6, 0F B7 /r: MOVZX r32, r/m8 or r/m16 *)
-  | Movsxd word4 rm                     (* REX.W 63 /r: MOVSXD r64, r/m32 *)
-  | Movsx word4 rm                      (* 0F BE /r: MOVSX r32, r8 *)
-  | Cdqe                                (* REX.W 98 *)
-  | Lea word4 address                   (* REX.W 8D /r *)
-  | Not size rm                         (* F7 /2, REX.W F7 /2 *)
-  | Neg size rm                         (* F7 /3 *)
-  | Inc size rm                         (* FF /0 *)
-  | Dec64 word4                        (* REX.W FF /1: DEC r64 *)
-  | Shift shift size rm (word8 option)  (* C1 /5 /7 ib, or by CL (NONE): D3 /4 /7;
-                                           REX.W D1 /5: SHR r64, 1 (SOME 1w) *)
-  | Rotate bool size word4 (word8 option) (* C1 /0 ib: ROL r32, imm8 (T); REX.W D3 /1: ROR r64, CL *)
-  | Imul word4 rm                       (* REX.W 0F AF /r: IMUL r64, r/m64 *)
-  | MulWide bool word4                  (* REX.W F7 /4, /5: MUL, IMUL r64 (signed if T) *)
-  | Div bool size word4                 (* F7 /6, REX.W F7 /6, /7: DIV r32, DIV r64, IDIV r64 *)
-  | Cqo                                 (* REX.W 99 *)
-  | ShiftDouble bool word4 word4        (* REX.W 0F A5, 0F AD /r: SHLD (T), SHRD r64, r64, CL *)
-  | Bswap word4                         (* REX.W 0F C8+r *)
-  | Adx bool word4 word4                (* 66 or F3 REX.W 0F 38 F6 /r: ADCX (F), ADOX (T), r64, r64 *)
-  | MovbeLoad word4 address             (* REX.W 0F 38 F0 /r: MOVBE r64, m64 *)
-  | MovbeStore address word4            (* REX.W 0F 38 F1 /r: MOVBE m64, r64 *)
-  | Crc32 size word4 rm                  (* F2 0F 38 F0 /r: CRC32 r32, r/m8;
-                                           F2 REX.W 0F 38 F1 /r: CRC32 r64, r64 *)
-  | BitCount bitcount size word4 word4  (* F3 REX.W 0F BC, BD, B8 /r: TZCNT, LZCNT, POPCNT r64, r64;
-                                           F3 0F BC, B8 /r: TZCNT, POPCNT r32, r32 *)
-  | Cmov word4 size word4 rm            (* 0F 4C /r: CMOVL r32; REX.W 0F 42, 4C /r: CMOVB, CMOVL r64 *)
-  | Setcc word4 rm                      (* 0F 92, 93, 94, 9C, 9F /r: SETB, SETAE, SETE, SETL, SETG r8 *)
-  | Mulx word4 word4 rm                 (* VEX.LZ.F2.0F38.W1 F6 /r: MULX r64 (high), r64 (low), r/m64 *)
-  | Rorx size word4 word4 word8         (* VEX.LZ.F2.0F3A.W0, W1 F0 /r ib: RORX r32, r32 or r64, r64 *)
-  | ShiftX shift word4 word4 word4      (* VEX.LZ.66, F2, F3.0F38.W1 F7 /r: SHLX, SHRX, SARX
-                                           r64, r64, r64 (count) *)
-  | Andn word4 word4 word4              (* VEX.LZ.0F38.W1 F2 /r: ANDN r64, r64 (inverted), r64 *)
-  | Bzhi word4 word4 word4              (* VEX.LZ.0F38.W1 F5 /r: BZHI r64, r64, r64 (index) *)
-  | Bls bls word4 word4                 (* VEX.LZ.0F38.W1 F3 /1, /3, /2: BLSR, BLSI, BLSMSK r64, r64 *)
-  | Pdep pdep word4 word4 word4         (* VEX.LZ.F2, F3.0F38.W1 F5 /r: PDEP, PEXT r64, r64, r64 (mask) *)
-  | Bextr word4 word4 word4             (* VEX.LZ.0F38.W1 F7 /r: BEXTR r64, r64, r64 (control) *)
-  | Push word4                          (* 50+r *)
-  | Pop word4                           (* 58+r *)
+    MovImm size rm word64               (* B0+r ib, B8+r iw/id/io, C6 /0 ib, C7 /0 iz *)
+  | Mov size rm rm                      (* 88..8B /r; A0..A3 moffs64 *)
+  | Binop binop size rm rm              (* 00..3B /r: ADD .. CMP; 84, 85 /r: TEST *)
+  | BinopImm binop size rm word64       (* 04..3D: AL/rAX, imm; 80, 81, 83 /digit;
+                                           A8, A9; F6, F7 /0: TEST *)
+  | Movx bool size size word4 rm        (* 0F B6, B7, BE, BF /r: MOVZX, MOVSX (signed);
+                                           63 /r: MOVSXD: destination and source sizes *)
+  | Cbw size                            (* 98: CBW, CWDE, CDQE *)
+  | Cwd size                            (* 99: CWD, CDQ, CQO *)
+  | Lea size word4 address              (* 8D /r *)
+  | Not size rm                         (* F6, F7 /2 *)
+  | Neg size rm                         (* F6, F7 /3 *)
+  | Inc size rm                         (* FE, FF /0 *)
+  | Dec size rm                         (* FE, FF /1 *)
+  | Shift shift size rm (word8 option)  (* C0, C1 /4 /5 /7 ib; D0, D1 (SOME 1w);
+                                           D2, D3 (by CL: NONE) *)
+  | Rotate rotate size rm (word8 option) (* C0, C1, D0..D3 /0..3 *)
+  | Imul size word4 rm (word64 option)  (* 0F AF /r; 69 /r iz, 6B /r ib (SOME imm) *)
+  | MulWide bool size rm                (* F6, F7 /4 /5: MUL, IMUL (signed) into rDX:rAX *)
+  | Div bool size rm                    (* F6, F7 /6 /7: DIV, IDIV (signed) *)
+  | ShiftDouble bool size rm word4 (word8 option)
+                                        (* 0F A4 ib, A5 (CL): SHLD (T); 0F AC, AD: SHRD *)
+  | Bswap size word4                    (* 0F C8+r *)
+  | Xchg size rm rm                     (* 86, 87 /r; 90+r *)
+  | Xadd size rm rm                     (* 0F C0, C1 /r *)
+  | Cmpxchg size rm rm                  (* 0F B0, B1 /r *)
+  | Cmpxchg2 bool address               (* 0F C7 /1: CMPXCHG8B; REX.W: CMPXCHG16B (T) *)
+  | Bt bt size rm word4                 (* 0F A3, AB, B3, BB /r: bit offset in a register *)
+  | BtImm bt size rm word8              (* 0F BA /4..7 ib *)
+  | BitScan bool size word4 rm          (* 0F BC, BD /r: BSF, BSR (reverse) *)
+  | BitCount bitcount size word4 rm     (* F3 0F BC, BD, B8 /r: TZCNT, LZCNT, POPCNT *)
+  | Adx bool size word4 rm              (* 66, F3 0F 38 F6 /r: ADCX, ADOX (T) *)
+  | Movbe size rm rm                    (* 0F 38 F0, F1 /r, one operand in memory *)
+  | Crc32 size word4 rm                 (* F2 0F 38 F0, F1 /r: the source size *)
+  | Cmov word4 size word4 rm            (* 0F 40..4F /r *)
+  | Setcc word4 rm                      (* 0F 90..9F /r *)
+  | Mulx size word4 word4 rm            (* VEX.LZ.F2.0F38 F6 /r: high, low, source *)
+  | Rorx size word4 rm word8            (* VEX.LZ.F2.0F3A F0 /r ib *)
+  | ShiftX shift size word4 rm word4    (* VEX.LZ.66, F3, F2.0F38 F7 /r: SHLX, SARX, SHRX
+                                           (count in vvvv) *)
+  | Andn size word4 word4 rm            (* VEX.LZ.0F38 F2 /r: d, inverted vvvv, r/m *)
+  | Bzhi size word4 rm word4            (* VEX.LZ.0F38 F5 /r: index in vvvv *)
+  | Bls bls size word4 rm               (* VEX.LZ.0F38 F3 /1 /3 /2: destination in vvvv *)
+  | Pdep pdep size word4 word4 rm       (* VEX.LZ.F2, F3.0F38 F5 /r: PDEP, PEXT d, vvvv, mask *)
+  | Bextr size word4 rm word4           (* VEX.LZ.0F38 F7 /r: control in vvvv *)
+  | Push size rm                        (* 50+r; FF /6 *)
+  | PushImm size word64                 (* 6A ib, 68 iz *)
+  | Pop size rm                         (* 58+r; 8F /0 *)
+  | Pushf size                          (* 9C *)
+  | Popf size                           (* 9D *)
+  | Lahf                                (* 9F *)
+  | Sahf                                (* 9E *)
+  | FlagOp flagop                       (* F8, F9, F5, FC, FD *)
+  | Leave size                          (* C9 *)
+  | Enter size word16 word8             (* C8 iw ib *)
   | Call word64                         (* E8 cd *)
-  | Jcc word4 word64                    (* 73-77, 79 cb; 0F 84, 85 cd *)
-  | Jmp word64                          (* EB cb *)
-  | JmpReg word4                        (* FF /4: JMP r64 *)
-  | Ret                                 (* C3 *)
-  | Nop                                 (* 90, 66 90, 0F 1F /0 *)
+  | CallInd rm                          (* FF /2 *)
+  | Jcc word4 word64                    (* 70..7F cb; 0F 80..8F cd *)
+  | Jmp word64                          (* EB cb; E9 cd *)
+  | JmpInd rm                           (* FF /4 *)
+  | Loop loop word64                    (* E0..E3 cb *)
+  | Ret word16                          (* C3; C2 iw *)
+  | Xlat                                (* D7 *)
+  | StringOp strop size rep             (* A4..A7, AA..AF *)
+  | Nop                                 (* 90, F3 90, and the hint NOPs 0F 0D, 0F 18..1F /r *)
   | VecLoad bool word4 address          (* 0F 10, F3 0F 6F /r: MOVUPS, MOVDQU xmm, m128;
                                            66 0F 6F /r: MOVDQA xmm, m128 (aligned, T) *)
   | VecStore address word4              (* 0F 11, F3 0F 7F /r: MOVUPS, MOVDQU m128, xmm *)
@@ -283,60 +331,126 @@ Definition decode_modrm_def:
         | other => unmatched other
 End
 
-(* Legacy prefixes the targets use: 66 (operand size, and SSE2's mandatory
-   prefix), F2 and F3 (SSE2's mandatory prefixes) and 2E (CS segment,
-   ignored in 64-bit mode). *)
+(* Prefixes in 64-bit mode: 66 (operand size, or a vector form's mandatory
+   prefix), F2 and F3 (repeat, or mandatory prefixes), the null segment
+   overrides 2E, 3E, 26 and 36, which are ignored, and REX bytes (40-4F),
+   which count only right before the opcode. LOCK, the FS and GS overrides
+   and the 67 address-size prefix are not modelled. *)
 Definition split_prefixes_def:
   split_prefixes [] = ([], []) ∧
   split_prefixes (b::bs) =
-    if b = 0x66w ∨ b = 0xF2w ∨ b = 0xF3w ∨ b = 0x2Ew then
+    if b = 0x66w ∨ b = 0xF2w ∨ b = 0xF3w ∨ b = 0x2Ew ∨ b = 0x3Ew ∨ b = 0x26w ∨ b = 0x36w ∨
+       b && 0xF0w = 0x40w then
       (let (ps, rest) = split_prefixes bs in (b::ps, rest))
     else ([], b::bs)
 End
 
-(* Registers 4..7 of a byte operand are AH..BH without a REX prefix. *)
-Definition byte_reg_ok_def:
-  byte_reg_ok (rex:word8) (r:word4) ⇔ rex ≠ 0w ∨ r <₊ 4w
+Definition has_prefix_def:
+  has_prefix (p:word8) [] = F ∧
+  has_prefix p (b::bs) = (b = p ∨ has_prefix p bs)
 End
 
-(* The operation of an op r/m, r opcode (register operands) at REX.W w. *)
-Definition rr_binop_def:
-  rr_binop (op:word8) w =
-    if op = 0x01w then SOME ADD
-    else if op = 0x09w then SOME OR
-    else if op = 0x11w ∧ w then SOME ADC
-    else if op = 0x19w ∧ w then SOME SBB
-    else if op = 0x21w ∧ ¬w then SOME AND
-    else if op = 0x29w ∧ w then SOME SUB
-    else if op = 0x31w then SOME XOR
-    else if op = 0x39w then SOME CMP
-    else if op = 0x85w then SOME TEST
-    else NONE
+Definition has_rex_def:
+  has_rex [] = F ∧
+  has_rex (b::bs) = (b && 0xF0w = 0x40w ∨ has_rex bs)
 End
 
-(* The operation of an op r, m opcode (memory source) at REX.W w. *)
-Definition rm_binop_def:
-  rm_binop (op:word8) w =
-    if op = 0x03w then SOME ADD
-    else if op = 0x13w ∧ w then SOME ADC
-    else if op = 0x1Bw ∧ w then SOME SBB
-    else if op = 0x2Bw ∧ w then SOME SUB
-    else if op = 0x33w ∧ ¬w then SOME XOR
-    else NONE
+(* What the prefixes say: an operand-size (66) prefix, the repeat prefix (F2
+   or F3, 0w when absent) and the REX byte (0w when absent). *)
+Datatype:
+  prefix = <| opsize : bool; rep : word8; rex : word8 |>
 End
 
-(* 83 /digit ib at REX.W w, on a register operand if reg. *)
-Definition imm_binop_def:
-  imm_binop w (digit:word3) reg =
-    if reg then
-      (if digit = 0w then SOME ADD
-       else if digit = 2w ∧ w then SOME ADC
-       else if digit = 3w ∧ ¬w then SOME SBB
-       else if digit = 4w then SOME AND
-       else if digit = 5w ∧ w then SOME SUB
-       else if digit = 7w then SOME CMP
-       else NONE)
-    else if digit = 7w ∧ ¬w then SOME CMP else NONE
+(* The operand size of a form with byte (S8) and full-size variants, at its
+   full size. *)
+Definition op_size_def:
+  op_size pf = if word_bit 3 pf.rex then S64 else if pf.opsize then S16 else S32
+End
+
+(* The operand size of a stack form, 64 bits unless a 66 prefix makes it 16. *)
+Definition stack_size_def:
+  stack_size pf = if pf.opsize ∧ ¬word_bit 3 pf.rex then S16 else S64
+End
+
+Definition rex_bits_def:
+  rex_bits (rex:word8) = (word_bit 2 rex, word_bit 1 rex, word_bit 0 rex)
+End
+
+(* An operand of size sz: registers 4..7 of a byte operand are AH..BH
+   without a REX prefix. *)
+Definition sized_def:
+  sized sz (rex:word8) (RmReg r) =
+    (if sz = S8 ∧ rex = 0w ∧ 4w ≤₊ r then RmHigh (w2w (r - 4w)) else RmReg r) ∧
+  sized sz rex (RmHigh h) = RmHigh h ∧
+  sized sz rex (RmMem a) = RmMem a
+End
+
+(* A k-byte little-endian immediate, sign-extended (k = 1, 2 or 4) or whole
+   (k = 8). *)
+Definition imm_value_def:
+  imm_value k (v:word64) =
+    if k = 1 then sw2sw (w2w v : word8) : word64
+    else if k = 2 then sw2sw (w2w v : word16)
+    else if k = 4 then sw2sw (w2w v : word32)
+    else v
+End
+
+Definition immediate_def:
+  immediate k bytes =
+    if LENGTH bytes < k then Truncated
+    else Decoded (imm_value k (le_word (TAKE k bytes))) k
+End
+
+(* The bytes of the immediate of a size-sz form. *)
+Definition imm_bytes_def:
+  imm_bytes S8 = 1n ∧ imm_bytes S16 = 2 ∧ imm_bytes S32 = 4 ∧ imm_bytes S64 = 4
+End
+
+(* A ModRM operand followed by a k-byte immediate (none for k = 0). *)
+Definition modrm_imm_def:
+  modrm_imm bits k bytes =
+    case decode_modrm bits bytes of
+      Decoded (reg, rm) n =>
+        (case immediate k (DROP n bytes) of
+           Decoded v m => Decoded (reg, rm, v) (n + m)
+         | other => unmatched other)
+    | other => unmatched other
+End
+
+(* The ModRM reg field of an opcode group, before the ModRM byte is decoded. *)
+Definition reg_field_def:
+  reg_field [] = NONE ∧
+  reg_field (m::rest) = SOME ((5 >< 3) m : word3)
+End
+
+Definition alu_def:
+  alu (d:word3) =
+    if d = 0w then ADD else if d = 1w then OR else if d = 2w then ADC
+    else if d = 3w then SBB else if d = 4w then AND else if d = 5w then SUB
+    else if d = 6w then XOR else CMP
+End
+
+Definition rotate_op_def:
+  rotate_op (d:word3) = if d = 0w then ROL else if d = 1w then ROR else if d = 2w then RCL else RCR
+End
+
+Definition bt_op_def:
+  bt_op (d:word2) = if d = 0w then BT else if d = 1w then BTS else if d = 2w then BTR else BTC
+End
+
+(* A4..A7 and AA..AF; F3 repeats, as does F2 but before CMPS and SCAS,
+   where it is REPNE. *)
+Definition string_op_def:
+  string_op (op:word8) =
+    if op <₊ 0xA6w then MOVS else if op <₊ 0xA8w then CMPS else if op <₊ 0xACw then STOS
+    else if op <₊ 0xAEw then LODS else SCAS
+End
+
+Definition string_rep_def:
+  string_rep (op:word8) (rep:word8) =
+    if rep = 0w then NoRep
+    else if rep = 0xF2w ∧ (string_op op = CMPS ∨ string_op op = SCAS) then RepNE
+    else RepE
 End
 
 (* A ModRM operand that must be a register: other operands are rejected
@@ -345,29 +459,6 @@ Definition decode_reg_modrm_def:
   decode_reg_modrm bits [] = Truncated ∧
   decode_reg_modrm bits (modrm::rest) =
     if (7 >< 6) modrm = (3w:word2) then decode_modrm bits (modrm::rest) else Rejected
-End
-
-(* 0F 1F /0 with a memory operand with a base (multi-byte nop) after its
-   0F, with the bytes from 1F on. Other group digits, RIP-relative and
-   no-base operands are rejected from their ModRM and SIB bytes, before
-   their displacement. *)
-Definition decode_nop_def:
-  decode_nop [] = Truncated ∧
-  decode_nop (b::modrm) =
-    if b ≠ 0x1Fw then Rejected
-    else
-      case modrm of
-        [] => Truncated
-      | m::rest =>
-          if (5 >< 3) m ≠ (0w:word3) ∨
-             (7 >< 6) m = (0w:word2) ∧
-             ((2 >< 0) m = (5w:word3) ∨
-              (2 >< 0) m = (4w:word3) ∧ (case rest of sib::_ => (2 >< 0) sib = (5w:word3) | [] => F))
-          then Rejected
-          else
-            case decode_modrm (F,F,F) modrm of
-              Decoded (_, RmMem (Mem (SOME base) index scale d)) n => Decoded Nop (2 + n)
-            | other => unmatched other
 End
 
 (* The 66 0F b operations on two XMM registers. *)
@@ -574,136 +665,136 @@ Definition decode_sse_def:
       else Rejected
 End
 
-(* The F2 0F 38 forms, with the bytes after 0F. F0 without REX.W
-   updates a dword from a byte; F1 with REX.W updates a qword from a
-   qword register. The decoder excludes AH..BH, as for other byte forms. *)
-Definition decode_crc32_def:
-  decode_crc32 (rex:word8) [] = Truncated ∧
-  decode_crc32 rex (b::rest) =
-    let w = word_bit 3 rex;
-        bits = (word_bit 2 rex, word_bit 1 rex, word_bit 0 rex) in
-      if b ≠ 0x38w then Rejected
-      else case rest of
-        [] => Truncated
-      | op::operands =>
-          if ¬w ∧ op = 0xF0w then
-            (case decode_modrm bits operands of
-               Decoded (d, RmMem a) n => Decoded (Crc32 S8 d (RmMem a)) (3 + n)
-             | Decoded (d, RmReg x) n =>
-                 if byte_reg_ok rex x then Decoded (Crc32 S8 d (RmReg x)) (3 + n) else Rejected
-             | other => unmatched other)
-          else if w ∧ op = 0xF1w then
-            (case decode_reg_modrm bits operands of
-               Decoded (d, RmReg x) n => Decoded (Crc32 S64 d (RmReg x)) (3 + n)
-             | other => unmatched other)
-          else Rejected
-End
-
-(* The REX.W 0F 38 forms, with the bytes from the third opcode on. *)
+(* 0F 38 F0, F1 and F6 after the prefixes, with the bytes from F0, F1 or F6
+   on and the number of bytes from the 0F on: MOVBE (no repeat prefix, a
+   memory operand), CRC32 (F2: a byte source from F0, a full-size one from
+   F1) and ADCX (66) or ADOX (F3, with or without 66). *)
 Definition decode_0f38_def:
-  decode_0f38 prefixes bits [] = Truncated ∧
-  decode_0f38 prefixes bits (b::rest) =
-    if b = 0xF6w ∧ (prefixes = [0x66w] ∨ prefixes = [0xF3w]) then
-      (case decode_reg_modrm bits rest of
-         Decoded (d, RmReg src) n => Decoded (Adx (prefixes = [0xF3w]) d src) (3 + n)
-       | other => unmatched other)
-    else if prefixes = [] ∧ (b = 0xF0w ∨ b = 0xF1w) then
-      (case decode_modrm bits rest of
-         Decoded (r, RmMem a) n =>
-           Decoded (if b = 0xF0w then MovbeLoad r a else MovbeStore a r) (3 + n)
-       | other => unmatched other)
-    else Rejected
+  decode_0f38 pf [] = Truncated ∧
+  decode_0f38 pf (c::rest) =
+    let rex = pf.rex; bits = rex_bits rex; sz = op_size pf in
+      if c = 0xF6w then
+        (if pf.rep = 0xF2w ∨ ¬pf.opsize ∧ pf.rep ≠ 0xF3w then Rejected
+         else case modrm_imm bits 0 rest of
+                Decoded (reg, rm, _) n =>
+                  Decoded (Adx (pf.rep = 0xF3w) (if word_bit 3 rex then S64 else S32) reg rm) (3 + n)
+              | other => unmatched other)
+      else if pf.rep = 0xF2w then
+        (case modrm_imm bits 0 rest of
+           Decoded (reg, rm, _) n =>
+             Decoded (if c = 0xF0w then Crc32 S8 reg (sized S8 rex rm) else Crc32 sz reg rm) (3 + n)
+         | other => unmatched other)
+      else if pf.rep = 0xF3w then Rejected
+      else
+        case decode_modrm bits rest of
+          Decoded (reg, RmMem a) n =>
+            Decoded (if c = 0xF0w then Movbe sz (RmReg reg) (RmMem a)
+                     else Movbe sz (RmMem a) (RmReg reg)) (3 + n)
+        | other => unmatched other
 End
 
-(* The two-byte opcodes 0F b after the REX byte, with the bytes from b on
-   and the number of bytes from the 0F on. *)
+(* The two-byte opcodes 0F b after the prefixes, with the bytes from b on
+   and the number of bytes from the 0F on. A repeat prefix is ignored where
+   the opcode doesn't use it; the vector forms take a lone 66, F2 or F3 as
+   their mandatory prefix. *)
 Definition decode_0f_def:
-  decode_0f (rex:word8) [] = Truncated ∧
-  decode_0f rex (b::rest) =
-    let w = word_bit 3 rex; bits = (word_bit 2 rex, word_bit 1 rex, word_bit 0 rex) in
-      if b = 0x10w ∨ b = 0x11w ∨ b = 0x57w then decode_sse 0w rex (b::rest)
-      else if b = 0x84w ∨ b = 0x85w then
-        (if rex ≠ 0w then Rejected
-         else case displacement 2w rest of
+  decode_0f pf [] = Truncated ∧
+  decode_0f pf (b::rest) =
+    let rex = pf.rex; bits = rex_bits rex; sz = op_size pf;
+        bsz = if word_bit 0 b then sz else S8
+    in
+      if b = 0x38w ∧ (case rest of c::_ => c = 0xF0w ∨ c = 0xF1w ∨ c = 0xF6w | [] => T) then
+        decode_0f38 pf rest
+      (* The hint NOPs, except the prefetches (0F 0D and 0F 18 /0..3 with a
+         memory operand), CLDEMOTE (0F 1C /0 with a memory operand and no
+         66, F2 or F3) and RDSSP (F3 0F 1E /1 with a register operand). *)
+      else if b = 0x0Dw ∨ 0x18w ≤₊ b ∧ b ≤₊ 0x1Fw then
+        (case rest of
+           [] => Truncated
+         | m::_ =>
+             let d = (5 >< 3) m : word3; mem = ((7 >< 6) m ≠ (3w:word2)) in
+               if b = 0x0Dw ∧ mem ∨ b = 0x18w ∧ mem ∧ d <₊ 4w ∨
+                  b = 0x1Cw ∧ mem ∧ d = 0w ∧ ¬pf.opsize ∧ pf.rep = 0w ∨
+                  b = 0x1Ew ∧ ¬mem ∧ d = 1w ∧ pf.rep = 0xF3w
+               then Rejected
+               else case modrm_imm bits 0 rest of
+                      Decoded _ n => Decoded Nop (2 + n)
+                    | other => unmatched other)
+      else if b && 0xF0w = 0x40w then
+        (case modrm_imm bits 0 rest of
+           Decoded (reg, rm, _) n => Decoded (Cmov (w2w b) sz reg rm) (2 + n)
+         | other => unmatched other)
+      else if b && 0xF0w = 0x80w then
+        (if pf.opsize then Rejected
+         else case immediate 4 rest of
                 Decoded d n => Decoded (Jcc (w2w b) d) (2 + n)
               | other => unmatched other)
-      else if b = 0xB6w ∨ b = 0xB7w then
-        (if w then Rejected
-         else case decode_modrm bits rest of
-                Decoded (dst, RmMem a) n =>
-                  Decoded (Movzx (if b = 0xB6w then S8 else S16) dst (RmMem a)) (2 + n)
-              | Decoded (dst, RmReg src) n =>
-                  if b = 0xB6w ∧ byte_reg_ok rex src then Decoded (Movzx S8 dst (RmReg src)) (2 + n)
-                  else Rejected
-              | other => unmatched other)
-      else if b = 0x4Cw ∨ b = 0x42w then
-        (if b = 0x42w ∧ ¬w then Rejected
-         else case decode_reg_modrm bits rest of
-                Decoded (dst, RmReg src) n =>
-                  Decoded (Cmov (w2w b) (if w then S64 else S32) dst (RmReg src)) (2 + n)
-              | other => unmatched other)
-      else if b = 0xBEw then
-        (if w then Rejected
-         else case decode_reg_modrm bits rest of
-                Decoded (dst, RmReg src) n =>
-                  if byte_reg_ok rex src then Decoded (Movsx dst (RmReg src)) (2 + n) else Rejected
-              | other => unmatched other)
-      else if b = 0x92w ∨ b = 0x93w ∨ b = 0x94w ∨ b = 0x9Cw ∨ b = 0x9Fw then
-        (if rex ≠ 0w ∧ rex ≠ 0x40w ∧ rex ≠ 0x41w then Rejected
-         else case decode_reg_modrm bits rest of
-                Decoded (reg, RmReg dst) n =>
-                  if reg = 0w ∧ byte_reg_ok rex dst then Decoded (Setcc (w2w b) (RmReg dst)) (2 + n)
-                  else Rejected
-              | other => unmatched other)
+      else if b && 0xF0w = 0x90w then
+        (case modrm_imm bits 0 rest of
+           Decoded (_, rm, _) n => Decoded (Setcc (w2w b) (sized S8 rex rm)) (2 + n)
+         | other => unmatched other)
+      else if b = 0xA3w ∨ b = 0xABw ∨ b = 0xB3w ∨ b = 0xBBw then
+        (case modrm_imm bits 0 rest of
+           Decoded (reg, rm, _) n => Decoded (Bt (bt_op ((4 >< 3) b)) sz rm reg) (2 + n)
+         | other => unmatched other)
+      else if b = 0xBAw then
+        (case reg_field rest of
+           NONE => Truncated
+         | SOME d =>
+             if ¬word_bit 2 d then Rejected
+             else case modrm_imm bits 1 rest of
+                    Decoded (reg, rm, v) n => Decoded (BtImm (bt_op (w2w d)) sz rm (w2w v)) (2 + n)
+                  | other => unmatched other)
+      else if b = 0xA4w ∨ b = 0xA5w ∨ b = 0xACw ∨ b = 0xADw then
+        (case modrm_imm bits (if word_bit 0 b then 0 else 1) rest of
+           Decoded (reg, rm, v) n =>
+             Decoded (ShiftDouble (b <₊ 0xA8w) sz rm reg (if word_bit 0 b then NONE else SOME (w2w v)))
+                     (2 + n)
+         | other => unmatched other)
       else if b = 0xAFw then
-        (if ¬w then Rejected
-         else case decode_modrm bits rest of
-                Decoded (dst, src) n => Decoded (Imul dst src) (2 + n)
+        (case modrm_imm bits 0 rest of
+           Decoded (reg, rm, _) n => Decoded (Imul sz reg rm NONE) (2 + n)
+         | other => unmatched other)
+      else if b = 0xB0w ∨ b = 0xB1w ∨ b = 0xC0w ∨ b = 0xC1w then
+        (case modrm_imm bits 0 rest of
+           Decoded (reg, rm, _) n =>
+             let d = sized bsz rex rm; s = sized bsz rex (RmReg reg) in
+               Decoded (if b <₊ 0xC0w then Cmpxchg bsz d s else Xadd bsz d s) (2 + n)
+         | other => unmatched other)
+      else if b = 0xB6w ∨ b = 0xB7w ∨ b = 0xBEw ∨ b = 0xBFw then
+        (case modrm_imm bits 0 rest of
+           Decoded (reg, rm, _) n =>
+             Decoded (if word_bit 0 b then Movx (word_bit 3 b) sz S16 reg rm
+                      else Movx (word_bit 3 b) sz S8 reg (sized S8 rex rm)) (2 + n)
+         | other => unmatched other)
+      else if b = 0xB8w ∨ b = 0xBCw ∨ b = 0xBDw then
+        (if b = 0xB8w ∧ pf.rep ≠ 0xF3w then Rejected
+         else case modrm_imm bits 0 rest of
+                Decoded (reg, rm, _) n =>
+                  Decoded (if pf.rep = 0xF3w then
+                             BitCount (if b = 0xBCw then TZCNT else if b = 0xBDw then LZCNT else POPCNT)
+                                      sz reg rm
+                           else BitScan (b = 0xBDw) sz reg rm) (2 + n)
               | other => unmatched other)
-      else if b = 0xA5w ∨ b = 0xADw then
-        (if ¬w then Rejected
-         else case decode_reg_modrm bits rest of
-                Decoded (src, RmReg dst) n => Decoded (ShiftDouble (b = 0xA5w) dst src) (2 + n)
-              | other => unmatched other)
-      else if b && 0xF8w = 0xC8w then
-        (if ¬w then Rejected else Decoded (Bswap (reg_num (word_bit 0 rex) (w2w b))) 2)
-      else Rejected
-End
-
-(* F3 0F b at REX.W w, with the bytes from b on and the number of bytes
-   from the 0F on: TZCNT, LZCNT and POPCNT on 64-bit registers, and TZCNT
-   and POPCNT on 32-bit ones. *)
-Definition decode_bitcount_def:
-  decode_bitcount w bits [] = Truncated ∧
-  decode_bitcount w bits (b::rest) =
-    if b = 0xBCw ∨ b = 0xB8w ∨ w ∧ b = 0xBDw then
-      (case decode_reg_modrm bits rest of
-         Decoded (d, RmReg src) n =>
-           Decoded (BitCount (if b = 0xBCw then TZCNT else if b = 0xBDw then LZCNT else POPCNT)
-                             (if w then S64 else S32) d src) (2 + n)
-       | other => unmatched other)
-    else Rejected
-End
-
-(* The r/m8, r8 operands of 88 and 38 with a memory r/m, after the REX
-   byte: the r8 register and the address. *)
-Definition decode_byte_mem_def:
-  decode_byte_mem (rex:word8) bits [] = Truncated ∧
-  decode_byte_mem rex bits (modrm::rest) =
-    if ¬byte_reg_ok rex ((5 >< 3) modrm) then Rejected
-    else case decode_modrm bits (modrm::rest) of
-           Decoded (src, RmMem a) n => Decoded (src, a) n
-         | other => unmatched other
+      else if b = 0xC7w then
+        (case rest of
+           [] => Truncated
+         | c::_ =>
+             if (5 >< 3) c ≠ (1w:word3) ∨ (7 >< 6) c = (3w:word2) then Rejected
+             else case decode_modrm bits rest of
+                    Decoded (_, RmMem a) n => Decoded (Cmpxchg2 (word_bit 3 rex) a) (2 + n)
+                  | other => unmatched other)
+      else if b && 0xF8w = 0xC8w then Decoded (Bswap sz (reg_num (word_bit 0 rex) (w2w b))) 2
+      else if pf.opsize ∧ pf.rep ≠ 0w then Rejected
+      else decode_sse (if pf.rep ≠ 0w then pf.rep else if pf.opsize then 0x66w else 0w) rex (b::rest)
 End
 
 (* The VEX-encoded BMI1 and BMI2 forms after a C4 byte, with the number of
    bytes from the C4 on: the first VEX byte holds the inverted R, X and B
-   bits and the opcode map (2: 0F38, 3: 0F3A), the second W, the inverted
-   register vvvv, L and the implied prefix pp (0: none, 1: 66, 2: F3, 3:
-   F2). Only W1 forms with L = 0, register operands but MULX's source,
-   and RORX at either width are modelled; the other maps, L = 1, W0 in map
-   0F38 and RORX with vvvv in use are rejected from the byte that holds
-   them. *)
+   bits and the opcode map (2: 0F38, 3: 0F3A), the second W (64-bit
+   operands), the inverted register vvvv, L and the implied prefix pp (0:
+   none, 1: 66, 2: F3, 3: F2). Forms with L = 1, other maps, and RORX with
+   vvvv in use are rejected from the byte that holds them. *)
 Definition decode_vex_def:
   decode_vex [] = Truncated ∧
   decode_vex (b1::rest) =
@@ -712,319 +803,255 @@ Definition decode_vex_def:
       else case rest of
         [] => Truncated
       | b2::rest' =>
-          let w = word_bit 7 b2; v = ¬((6 >< 3) b2) : word4; pp = (1 >< 0) b2 : word2;
-              bits = (¬word_bit 7 b1, ¬word_bit 6 b1, ¬word_bit 5 b1)
+          let v = ¬((6 >< 3) b2) : word4; pp = (1 >< 0) b2 : word2;
+              bits = (¬word_bit 7 b1, ¬word_bit 6 b1, ¬word_bit 5 b1);
+              sz = if word_bit 7 b2 then S64 else S32
           in
-            if word_bit 2 b2 ∨ (if mmap = 2w then ¬w else pp ≠ 3w ∨ v ≠ 0w) then Rejected
+            if word_bit 2 b2 ∨ mmap = 3w ∧ (pp ≠ 3w ∨ v ≠ 0w) then Rejected
             else case rest' of
               [] => Truncated
             | op::modrm =>
                 if mmap = 3w then
                   (if op ≠ 0xF0w then Rejected
-                   else case decode_reg_modrm bits modrm of
-                          Decoded (d, RmReg src) n =>
-                            (case DROP n modrm of
-                               imm::_ => Decoded (Rorx (if w then S64 else S32) d src imm) (5 + n)
-                             | [] => Truncated)
+                   else case modrm_imm bits 1 modrm of
+                          Decoded (d, src, imm) n => Decoded (Rorx sz d src (w2w imm)) (4 + n)
                         | other => unmatched other)
-                else if op = 0xF6w ∧ pp = 3w then
-                  (case decode_modrm bits modrm of
-                     Decoded (hi, src) n => Decoded (Mulx hi v src) (4 + n)
+                else if op = 0xF6w ∧ pp = 3w ∨ op = 0xF7w ∨ op = 0xF5w ∧ pp ≠ 1w ∨
+                        op = 0xF2w ∧ pp = 0w then
+                  (case modrm_imm bits 0 modrm of
+                     Decoded (d, src, _) n =>
+                       Decoded (if op = 0xF6w then Mulx sz d v src
+                                else if op = 0xF7w then
+                                  (if pp = 0w then Bextr sz d src v
+                                   else ShiftX (if pp = 1w then SHL else if pp = 3w then SHR else SAR)
+                                               sz d src v)
+                                else if op = 0xF5w then
+                                  (if pp = 0w then Bzhi sz d src v
+                                   else Pdep (if pp = 3w then PDEP else PEXT) sz d v src)
+                                else Andn sz d v src) (4 + n)
                    | other => unmatched other)
-                else if op = 0xF7w then
-                  (case decode_reg_modrm bits modrm of
-                     Decoded (d, RmReg src) n =>
-                       Decoded (if pp = 0w then Bextr d src v
-                                else ShiftX (if pp = 1w then SHL else if pp = 3w then SHR else SAR)
-                                            d src v) (4 + n)
-                   | other => unmatched other)
-                else if op = 0xF5w ∧ pp ≠ 1w then
-                  (case decode_reg_modrm bits modrm of
-                     Decoded (d, RmReg src) n =>
-                       Decoded (if pp = 0w then Bzhi d src v
-                                else Pdep (if pp = 3w then PDEP else PEXT) d v src) (4 + n)
-                   | other => unmatched other)
-                else if op = 0xF2w ∧ pp = 0w then
-                  (case decode_reg_modrm bits modrm of
-                     Decoded (d, RmReg src) n => Decoded (Andn d v src) (4 + n)
-                   | other => unmatched other)
-                else if op = 0xF3w ∧ pp = 0w ∧ word_bit 7 b1 then
-                  (case decode_reg_modrm bits modrm of
-                     Decoded (digit, RmReg src) n =>
-                       if digit = 1w then Decoded (Bls BLSR v src) (4 + n)
-                       else if digit = 2w then Decoded (Bls BLSMSK v src) (4 + n)
-                       else if digit = 3w then Decoded (Bls BLSI v src) (4 + n)
-                       else Rejected
-                   | other => unmatched other)
+                else if op = 0xF3w ∧ pp = 0w then
+                  (case reg_field modrm of
+                     NONE => Truncated
+                   | SOME g =>
+                       if g ≠ 1w ∧ g ≠ 2w ∧ g ≠ 3w then Rejected
+                       else case modrm_imm bits 0 modrm of
+                              Decoded (_, src, _) n =>
+                                Decoded (Bls (if g = 1w then BLSR else if g = 2w then BLSMSK else BLSI)
+                                             sz v src) (4 + n)
+                            | other => unmatched other)
                 else Rejected
 End
 
-(* No F2 or F3 among the prefixes. *)
-Definition no_rep_def:
-  no_rep [] = T ∧
-  no_rep (b::bs) = (b ≠ (0xF2w:word8) ∧ b ≠ 0xF3w ∧ no_rep bs)
-End
-
-(* Whether an opcode can still complete an instruction after the legacy
-   prefixes and the REX byte (rex = 0w when absent or not yet fetched):
-   with legacy prefixes, only the nops (66 and 2E, no REX), 66 89, the
-   vector forms (a lone 66, F2 or F3; REX.W only after 66), the bit
-   counts (a lone F3), the ADX forms (66 or F3, REX.W) and CRC32
-   (a lone F2, with REX.W for the qword form) are modelled. *)
-Definition prefixes_ok_def:
-  prefixes_ok prefixes (rex:word8) ⇔
-    prefixes = [] ∨ no_rep prefixes ∧ rex = 0w ∨ prefixes = [0xF3w] ∨ prefixes = [0x66w] ∨
-    prefixes = [0xF2w]
-End
-
-(* The instruction after the legacy prefixes and the REX byte (rex = 0w
-   when absent), with the number of bytes from the opcode on. F2 before
-   0F 38 selects CRC32. A lone 66, F2 (without REX.W) or F3 before 0F
-   can be a vector form's mandatory prefix. Before 0F BC and
-   0F B8, or with REX.W, F3 is a bit count's, except 66 before the 0F 1F
-   nop; with no byte after 0F, 66 is
-   the nop's prefix unless a REX byte rules the nop out. *)
-Definition decode_opcode_def:
-  decode_opcode prefixes (rex:word8) [] =
-    (if prefixes_ok prefixes rex then Truncated else Rejected) ∧
-  decode_opcode prefixes rex (op::rest) =
-    let legacy = (prefixes ≠ []);
-        w = word_bit 3 rex; bits = (word_bit 2 rex, word_bit 1 rex, word_bit 0 rex);
-        sz = if w then S64 else S32;
+(* The instruction after the prefixes, from its opcode byte op on, with the
+   number of bytes from op on. A 66 prefix before a near branch is rejected:
+   Intel and AMD CPUs execute it differently. *)
+Definition decode_one_def:
+  decode_one pf (op:word8) rest =
+    let rex = pf.rex; bits = rex_bits rex; sz = op_size pf; ssz = stack_size pf;
+        bsz = if word_bit 0 op then sz else S8;
         rb = reg_num (word_bit 0 rex) (w2w op)
     in
-      if op = 0x0Fw ∧ w ∧
-         (prefixes = [] ∨ prefixes = [0x66w] ∨ prefixes = [0xF3w]) ∧
-         (case rest of b::_ => b = 0x38w | [] => F) then
-        decode_0f38 prefixes bits (TL rest)
-      else if op = 0x0Fw ∧ prefixes = [0xF2w] ∧
-         (w ∨ case rest of b::_ => b = 0x38w | [] => F) then
-        decode_crc32 rex rest
-      else if op = 0x0Fw ∧ prefixes = [0xF3w] ∧
-         (w ∨ case rest of b::_ => b = 0xBCw ∨ b = 0xB8w | [] => F) then
-        decode_bitcount w bits rest
-      else if op = 0x0Fw ∧
-         (prefixes = [0xF2w] ∧ ¬w ∨ prefixes = [0xF3w] ∨
-          prefixes = [0x66w] ∧ (case rest of b::_ => b ≠ 0x1Fw | [] => rex ≠ 0w)) then
-        decode_sse (HD prefixes) rex rest
-      else if op = 0x0Fw ∧ rex = 0w ∧ no_rep prefixes ∧ (legacy ∨ decode_nop rest ≠ Rejected) then
-        decode_nop rest
-      else if prefixes = [0x66w] ∧ op = 0x89w ∧ ¬w then
-        (case decode_modrm bits rest of
-           Decoded (src, RmMem a) n => Decoded (Mov S16 (RmMem a) (RmReg src)) (1 + n)
+      if op <₊ 0x40w ∧ (op && 7w) <₊ 4w then
+        (case modrm_imm bits 0 rest of
+           Decoded (reg, rm, _) n =>
+             let r = sized bsz rex (RmReg reg); m = sized bsz rex rm in
+               Decoded (if word_bit 1 op then Binop (alu (w2w (op >>> 3))) bsz r m
+                        else Binop (alu (w2w (op >>> 3))) bsz m r) (1 + n)
          | other => unmatched other)
-      else if prefixes = [0x66w] ∧ op = 0x90w ∧ rex = 0w then Decoded Nop 1
-      else if legacy then Rejected
-      else if op = 0xC4w then (if rex ≠ 0w then Rejected else decode_vex rest)
-      else if op && 0xF8w = 0xB8w then
-        (if w then
-           (if LENGTH rest < 8 then Truncated else Decoded (MovImm64 rb (le_word (TAKE 8 rest))) 9)
-         else if LENGTH rest < 4 then Truncated
-         else Decoded (MovImm rb (w2w (le_word (TAKE 4 rest)))) 5)
-      else if op = 0x0Dw then
-        (if rex ≠ 0w then Rejected
-         else if LENGTH rest < 4 then Truncated
-         else Decoded (BinopImm OR S32 (RmReg 0w) (sw2sw (w2w (le_word (TAKE 4 rest)) : word32))) 5)
-      else if op = 0x81w then
-        (if w then Rejected else
-         case rest of
-           [] => Truncated
-         | modrm::_ =>
-             if (5 >< 3) modrm ≠ (6w:word3) then Rejected
-             else case decode_reg_modrm bits rest of
-                    Decoded (reg, RmReg dst) n =>
-                      if LENGTH (DROP n rest) < 4 then Truncated
-                      else Decoded (BinopImm XOR S32 (RmReg dst)
-                                      (sw2sw (w2w (le_word (TAKE 4 (DROP n rest))) : word32)))
-                                   (5 + n)
-                  | other => unmatched other)
-      else if op = 0xC7w then
-        (if ¬w then Rejected else
-         case rest of
-           [] => Truncated
-         | modrm::_ =>
-             if (5 >< 3) modrm ≠ (0w:word3) then Rejected
-             else case decode_reg_modrm bits rest of
-                    Decoded (reg, RmReg dst) n =>
-                      if LENGTH (DROP n rest) < 4 then Truncated
-                      else Decoded (MovImm64 dst
-                                      (sw2sw (w2w (le_word (TAKE 4 (DROP n rest))) : word32)))
-                                   (5 + n)
-                  | other => unmatched other)
-      else if op = 0x80w then
-        (if w then Rejected else
-         case rest of
-           [] => Truncated
-         | modrm::_ =>
-             if (5 >< 3) modrm ≠ (7w:word3) then Rejected
-             else case decode_reg_modrm bits rest of
-                    Decoded (reg, RmReg dst) n =>
-                      if ¬byte_reg_ok rex dst then Rejected
-                      else (case DROP n rest of
-                              imm::_ => Decoded (BinopImm CMP S8 (RmReg dst) (sw2sw imm)) (2 + n)
-                            | [] => Truncated)
-                  | other => unmatched other)
-      else if op && 0xF8w = 0x50w then
-        (if rex = 0w ∨ rex = 0x41w then Decoded (Push rb) 1 else Rejected)
-      else if op && 0xF8w = 0x58w then
-        (if rex = 0w ∨ rex = 0x41w then Decoded (Pop rb) 1 else Rejected)
-      else if op = 0x90w then (if rex = 0w then Decoded Nop 1 else Rejected)
-      else if op = 0x98w then (if rex = 0x48w then Decoded Cdqe 1 else Rejected)
-      else if op = 0x99w then (if rex = 0x48w then Decoded Cqo 1 else Rejected)
-      else if op = 0xC3w then (if rex = 0w then Decoded Ret 1 else Rejected)
-      else if op = 0xE8w then
-        (if rex ≠ 0w then Rejected
-         else case displacement 2w rest of
-                Decoded d n => Decoded (Call d) (1 + n)
-              | other => unmatched other)
-      else if op = 0x73w ∨ op = 0x74w ∨ op = 0x75w ∨ op = 0x76w ∨ op = 0x77w ∨ op = 0x79w then
-        (if rex ≠ 0w then Rejected
-         else case rest of d::_ => Decoded (Jcc (w2w op) (sw2sw d)) 2 | [] => Truncated)
-      else if op = 0xEBw then
-        (if rex ≠ 0w then Rejected
-         else case rest of d::_ => Decoded (Jmp (sw2sw d)) 2 | [] => Truncated)
-      else if op = 0x0Fw then decode_0f rex rest
-      else if op = 0x89w then
-        (case decode_modrm bits rest of
-           Decoded (src, dst) n => Decoded (Mov sz dst (RmReg src)) (1 + n)
+      else if op <₊ 0x40w ∧ (op && 6w) = 4w then
+        (case immediate (imm_bytes bsz) rest of
+           Decoded v n => Decoded (BinopImm (alu (w2w (op >>> 3))) bsz (RmReg 0w) v) (1 + n)
          | other => unmatched other)
-      else if op = 0x8Bw then
-        (case decode_modrm bits rest of
-           Decoded (dst, RmMem a) n => Decoded (Mov sz (RmReg dst) (RmMem a)) (1 + n)
+      else if op && 0xF8w = 0x50w then Decoded (Push ssz (RmReg rb)) 1
+      else if op && 0xF8w = 0x58w then Decoded (Pop ssz (RmReg rb)) 1
+      else if op = 0x63w then
+        (case modrm_imm bits 0 rest of
+           Decoded (reg, rm, _) n => Decoded (Movx T sz (if sz = S64 then S32 else sz) reg rm) (1 + n)
          | other => unmatched other)
-      else if op = 0x88w ∨ op = 0x38w then
-        (if w then Rejected
-         else case decode_byte_mem rex bits rest of
-                Decoded (src, a) n =>
-                  Decoded (if op = 0x88w then Mov S8 (RmMem a) (RmReg src)
-                           else Binop CMP S8 (RmMem a) (RmReg src)) (1 + n)
+      else if op = 0x68w ∨ op = 0x6Aw then
+        (case immediate (if op = 0x6Aw then 1 else imm_bytes ssz) rest of
+           Decoded v n => Decoded (PushImm ssz v) (1 + n)
+         | other => unmatched other)
+      else if op = 0x69w ∨ op = 0x6Bw then
+        (case modrm_imm bits (if op = 0x6Bw then 1 else imm_bytes sz) rest of
+           Decoded (reg, rm, v) n => Decoded (Imul sz reg rm (SOME v)) (1 + n)
+         | other => unmatched other)
+      else if op && 0xF0w = 0x70w then
+        (if pf.opsize then Rejected
+         else case immediate 1 rest of
+                Decoded d n => Decoded (Jcc (w2w op) d) (1 + n)
               | other => unmatched other)
-      else if op = 0x30w ∨ op = 0x28w ∨ op = 0x84w then
-        (if w then Rejected
-         else case decode_reg_modrm bits rest of
-                Decoded (src, RmReg dst) n =>
-                  if byte_reg_ok rex src ∧ byte_reg_ok rex dst then
-                    Decoded (Binop (if op = 0x30w then XOR else if op = 0x28w then SUB else TEST)
-                                   S8 (RmReg dst) (RmReg src)) (1 + n)
-                  else Rejected
-              | other => unmatched other)
-      else if op = 0x39w ∧ w then
-        (case decode_modrm bits rest of
-           Decoded (src, dst) n => Decoded (Binop CMP S64 dst (RmReg src)) (1 + n)
+      else if op = 0x80w ∨ op = 0x81w ∨ op = 0x83w then
+        (case modrm_imm bits (if op = 0x81w then imm_bytes sz else 1) rest of
+           Decoded (reg, rm, v) n =>
+             let s = if op = 0x80w then S8 else sz in
+               Decoded (BinopImm (alu (w2w reg)) s (sized s rex rm) v) (1 + n)
+         | other => unmatched other)
+      else if 0x84w ≤₊ op ∧ op ≤₊ 0x8Bw then
+        (case modrm_imm bits 0 rest of
+           Decoded (reg, rm, _) n =>
+             let r = sized bsz rex (RmReg reg); m = sized bsz rex rm in
+               Decoded (if op <₊ 0x86w then Binop TEST bsz m r
+                        else if op <₊ 0x88w then Xchg bsz m r
+                        else if word_bit 1 op then Mov bsz r m
+                        else Mov bsz m r) (1 + n)
          | other => unmatched other)
       else if op = 0x8Dw then
-        (if ¬w then Rejected
-         else case decode_modrm bits rest of
-                Decoded (dst, RmMem a) n => Decoded (Lea dst a) (1 + n)
+        (case decode_modrm bits rest of
+           Decoded (reg, RmMem a) n => Decoded (Lea sz reg a) (1 + n)
+         | other => unmatched other)
+      else if op = 0x8Fw then
+        (case reg_field rest of
+           NONE => Truncated
+         | SOME d =>
+             if d ≠ 0w then Rejected
+             else case modrm_imm bits 0 rest of
+                    Decoded (_, rm, _) n => Decoded (Pop ssz rm) (1 + n)
+                  | other => unmatched other)
+      else if op && 0xF8w = 0x90w then
+        (if op = 0x90w ∧ (pf.rep = 0xF3w ∨ ¬word_bit 0 rex) then Decoded Nop 1
+         else Decoded (Xchg sz (RmReg rb) (RmReg 0w)) 1)
+      else if op = 0x98w then Decoded (Cbw sz) 1
+      else if op = 0x99w then Decoded (Cwd sz) 1
+      else if op = 0x9Cw then Decoded (Pushf ssz) 1
+      else if op = 0x9Dw then Decoded (Popf ssz) 1
+      else if op = 0x9Ew then Decoded Sahf 1
+      else if op = 0x9Fw then Decoded Lahf 1
+      else if op && 0xFCw = 0xA0w then
+        (case immediate 8 rest of
+           Decoded a n =>
+             let m = RmMem (Mem NONE NONE 0w a) in
+               Decoded (if word_bit 1 op then Mov bsz m (RmReg 0w) else Mov bsz (RmReg 0w) m)
+                       (1 + n)
+         | other => unmatched other)
+      else if op = 0xA8w ∨ op = 0xA9w then
+        (case immediate (imm_bytes bsz) rest of
+           Decoded v n => Decoded (BinopImm TEST bsz (RmReg 0w) v) (1 + n)
+         | other => unmatched other)
+      else if 0xA4w ≤₊ op ∧ op ≤₊ 0xAFw then
+        Decoded (StringOp (string_op op) bsz (string_rep op pf.rep)) 1
+      else if op && 0xF0w = 0xB0w then
+        (let s = if op <₊ 0xB8w then S8 else sz in
+           case immediate (if s = S64 then 8 else imm_bytes s) rest of
+             Decoded v n => Decoded (MovImm s (sized s rex (RmReg rb)) v) (1 + n)
+           | other => unmatched other)
+      else if op = 0xC0w ∨ op = 0xC1w ∨ op && 0xFCw = 0xD0w then
+        (case reg_field rest of
+           NONE => Truncated
+         | SOME d =>
+             if d = 6w then Rejected
+             else case modrm_imm bits (if op <₊ 0xD0w then 1 else 0) rest of
+                    Decoded (_, rm, v) n =>
+                      let count = if op <₊ 0xD0w then SOME (w2w v)
+                                  else if op <₊ 0xD2w then SOME 1w else NONE;
+                          m = sized bsz rex rm
+                      in
+                        Decoded (if d = 4w then Shift SHL bsz m count
+                                 else if d = 5w then Shift SHR bsz m count
+                                 else if d = 7w then Shift SAR bsz m count
+                                 else Rotate (rotate_op d) bsz m count) (1 + n)
+                  | other => unmatched other)
+      else if op = 0xC2w ∨ op = 0xC3w then
+        (if pf.opsize then Rejected
+         else if op = 0xC3w then Decoded (Ret 0w) 1
+         else case immediate 2 rest of
+                Decoded v n => Decoded (Ret (w2w v)) (1 + n)
               | other => unmatched other)
-      else if op = 0x63w then
-        (if ¬w then Rejected
-         else case decode_modrm bits rest of
-                Decoded (dst, src) n => Decoded (Movsxd dst src) (1 + n)
-              | other => unmatched other)
-      else if op = 0x83w then
+      else if op = 0xC6w ∨ op = 0xC7w then
+        (case reg_field rest of
+           NONE => Truncated
+         | SOME d =>
+             if d ≠ 0w then Rejected
+             else case modrm_imm bits (imm_bytes bsz) rest of
+                    Decoded (_, rm, v) n => Decoded (MovImm bsz (sized bsz rex rm) v) (1 + n)
+                  | other => unmatched other)
+      else if op = 0xC8w then
         (case rest of
-           [] => Truncated
-         | modrm::_ =>
-             case imm_binop w ((5 >< 3) modrm) ((7 >< 6) modrm = (3w:word2)) of
-               NONE => Rejected
-             | SOME bop =>
-                 case decode_modrm bits rest of
-                   Decoded (reg, dst) n =>
-                     (case DROP n rest of
-                        imm::_ => Decoded (BinopImm bop sz dst (sw2sw imm)) (2 + n)
-                      | [] => Truncated)
-                 | other => unmatched other)
-      else if op = 0xF7w then
-        (case decode_reg_modrm bits rest of
-           Decoded (reg, RmReg dst) n =>
-             let digit = (w2w reg : word3) in
-               if digit = 2w then Decoded (Not sz (RmReg dst)) (1 + n)
-               else if digit = 3w ∧ ¬w then Decoded (Neg S32 (RmReg dst)) (1 + n)
-               else if (digit = 4w ∨ digit = 5w) ∧ w then Decoded (MulWide (digit = 5w) dst) (1 + n)
-               else if digit = 6w then Decoded (Div F sz dst) (1 + n)
-               else if digit = 7w ∧ w then Decoded (Div T S64 dst) (1 + n)
-               else Rejected
-         | other => unmatched other)
-      else if op = 0xFFw then
-        (if ¬w ∧ rex ≠ 0w ∧ rex ≠ 0x41w then Rejected
-         else case decode_reg_modrm bits rest of
-                Decoded (reg, RmReg dst) n =>
-                  if (w2w reg : word3) = 0w ∧ w then Decoded (Inc S64 (RmReg dst)) (1 + n)
-                  else if (w2w reg : word3) = 1w ∧ w then Decoded (Dec64 dst) (1 + n)
-                  else if (w2w reg : word3) = 4w ∧ ¬w then Decoded (JmpReg dst) (1 + n)
-                  else Rejected
+           a::b::c::_ => Decoded (Enter ssz (w2w (le_word [a; b])) c) 4
+         | _ => Truncated)
+      else if op = 0xC9w then Decoded (Leave ssz) 1
+      else if op = 0xD7w then Decoded Xlat 1
+      else if op && 0xFCw = 0xE0w then
+        (if pf.opsize then Rejected
+         else case immediate 1 rest of
+                Decoded d n =>
+                  Decoded (Loop (if op = 0xE0w then LOOPNE else if op = 0xE1w then LOOPE
+                                 else if op = 0xE2w then LOOP else JRCXZ) d) (1 + n)
               | other => unmatched other)
-      else if op = 0xC1w then
-        (case decode_reg_modrm bits rest of
-           Decoded (reg, RmReg dst) n =>
-             if (w2w reg : word3) = 5w ∨ (w2w reg : word3) = 7w ∧ w then
-               (case DROP n rest of
-                  imm::_ =>
-                    Decoded (Shift (if (w2w reg : word3) = 5w then SHR else SAR) sz
-                                   (RmReg dst) (SOME imm)) (2 + n)
-                | [] => Truncated)
-             else if (w2w reg : word3) = 0w ∧ ¬w then
-               (case DROP n rest of
-                  imm::_ => Decoded (Rotate T S32 dst (SOME imm)) (2 + n)
-                | [] => Truncated)
-             else Rejected
-         | other => unmatched other)
-      else if op = 0xD1w then
-        (if ¬w then Rejected
-         else case decode_reg_modrm bits rest of
-                Decoded (reg, RmReg dst) n =>
-                  if (w2w reg : word3) = 5w then Decoded (Shift SHR S64 (RmReg dst) (SOME 1w)) (1 + n)
-                  else Rejected
+      else if op = 0xE8w ∨ op = 0xE9w ∨ op = 0xEBw then
+        (if pf.opsize then Rejected
+         else case immediate (if op = 0xEBw then 1 else 4) rest of
+                Decoded d n => Decoded (if op = 0xE8w then Call d else Jmp d) (1 + n)
               | other => unmatched other)
-      else if op = 0xD3w then
-        (case decode_reg_modrm bits rest of
-           Decoded (reg, RmReg dst) n =>
-             if (w2w reg : word3) = 4w then Decoded (Shift SHL sz (RmReg dst) NONE) (1 + n)
-             else if (w2w reg : word3) = 5w ∧ w then Decoded (Shift SHR S64 (RmReg dst) NONE) (1 + n)
-             else if (w2w reg : word3) = 7w ∧ ¬w then
-               Decoded (Shift SAR S32 (RmReg dst) NONE) (1 + n)
-             else if (w2w reg : word3) = 1w ∧ w then Decoded (Rotate F S64 dst NONE) (1 + n)
-             else Rejected
-         | other => unmatched other)
-      else
-        case rm_binop op w of
-          SOME bop =>
-            (case decode_modrm bits rest of
-               Decoded (dst, RmMem a) n => Decoded (Binop bop sz (RmReg dst) (RmMem a)) (1 + n)
-             | other => unmatched other)
-        | NONE =>
-            case rr_binop op w of
-              NONE => Rejected
-            | SOME bop =>
-                case decode_reg_modrm bits rest of
-                  Decoded (src, RmReg dst) n =>
-                    Decoded (Binop bop sz (RmReg dst) (RmReg src)) (1 + n)
-                | other => unmatched other
+      else if op = 0xF5w then Decoded (FlagOp CMC) 1
+      else if op = 0xF8w then Decoded (FlagOp CLC) 1
+      else if op = 0xF9w then Decoded (FlagOp STC) 1
+      else if op = 0xFCw then Decoded (FlagOp CLD) 1
+      else if op = 0xFDw then Decoded (FlagOp STD) 1
+      else if op = 0xF6w ∨ op = 0xF7w then
+        (case reg_field rest of
+           NONE => Truncated
+         | SOME d =>
+             if d = 1w then Rejected
+             else case modrm_imm bits (if d = 0w then imm_bytes bsz else 0) rest of
+                    Decoded (_, rm, v) n =>
+                      let m = sized bsz rex rm in
+                        Decoded (if d = 0w then BinopImm TEST bsz m v
+                                 else if d = 2w then Not bsz m
+                                 else if d = 3w then Neg bsz m
+                                 else if d = 4w then MulWide F bsz m
+                                 else if d = 5w then MulWide T bsz m
+                                 else if d = 6w then Div F bsz m
+                                 else Div T bsz m) (1 + n)
+                  | other => unmatched other)
+      else if op = 0xFEw ∨ op = 0xFFw then
+        (case reg_field rest of
+           NONE => Truncated
+         | SOME d =>
+             if op = 0xFEw ∧ 2w ≤₊ d ∨ d = 3w ∨ d = 5w ∨ d = 7w ∨
+                pf.opsize ∧ (d = 2w ∨ d = 4w) then Rejected
+             else case modrm_imm bits 0 rest of
+                    Decoded (_, rm, _) n =>
+                      let m = sized bsz rex rm in
+                        Decoded (if d = 0w then Inc bsz m
+                                 else if d = 1w then Dec bsz m
+                                 else if d = 2w then CallInd rm
+                                 else if d = 4w then JmpInd rm
+                                 else Push ssz rm) (1 + n)
+                  | other => unmatched other)
+      else if op = 0x0Fw then decode_0f pf rest
+      else if op = 0xC4w then
+        (if pf.opsize ∨ pf.rep ≠ 0w ∨ rex ≠ 0w then Rejected else decode_vex rest)
+      else Rejected
 End
 
-(* An instruction and its length in bytes, at most 15. *)
+(* An instruction and its length in bytes, at most 15: prefixes, at most one
+   of F2 and F3, then the opcode; a REX byte counts only as the last prefix.
+   A VEX form after any REX byte is rejected, as QEMU does, rather than
+   reading a REX byte before other prefixes as ignored, as XED does. *)
 Definition decode_def:
   decode bytes =
-    let (prefixes, rest) = split_prefixes bytes;
+    let (prefixes, body) = split_prefixes bytes;
         p = LENGTH prefixes
     in
-      case rest of
-        [] => if prefixes_ok prefixes 0w then Truncated else Rejected
-      | b::rest' =>
-          let decoded =
-                if b && 0xF0w = 0x40w then
-                  (case decode_opcode prefixes b rest' of
-                     Decoded i n => Decoded i (p + 1 + n)
-                   | other => other)
-                else
-                  (case decode_opcode prefixes 0w rest of
-                     Decoded i n => Decoded i (p + n)
-                   | other => other)
-          in
-            case decoded of
-              Decoded i n => if n ≤ 15 then Decoded i n else Rejected
-            | other => other
+      if has_prefix 0xF2w prefixes ∧ has_prefix 0xF3w prefixes ∨
+         has_rex prefixes ∧ (case body of b::_ => b = 0xC4w | [] => F) then Rejected
+      else
+        let rex = (case REVERSE prefixes of
+                     b::_ => if b && 0xF0w = 0x40w then b else 0w
+                   | [] => 0w);
+            pf = <| opsize := has_prefix 0x66w prefixes;
+                    rep := (if has_prefix 0xF3w prefixes then 0xF3w
+                            else if has_prefix 0xF2w prefixes then 0xF2w else 0w);
+                    rex := rex |>
+        in
+          case body of
+            [] => Truncated
+          | op::more =>
+              case decode_one pf op more of
+                Decoded i n => if p + n ≤ 15 then Decoded i (p + n) else Rejected
+              | other => other
 End
 
 (* Semantics *)
@@ -1723,8 +1750,8 @@ End
 
 (* Both ADX instructions use unsigned carry, including ADOX's OF chain. *)
 Definition adx_result_def:
-  adx_result c (a:word64) b =
-    let r = a + b + (if c then 1w else 0w) in
+  adx_result c sz (a:word64) b =
+    let r = (a + b + (if c then 1w else 0w)) && size_mask sz in
       (r, r <₊ a ∨ c ∧ r = a)
 End
 
@@ -1740,8 +1767,9 @@ Definition writes_result_def:
 End
 
 (* Result and flags of shifting the size-masked a by count, masked to 5 bits
-   (6 at 64 bits). A masked count of 0 leaves the flags f; otherwise AF, and
-   OF after counts above 1, come from u. *)
+   (6 at 64 bits). A masked count of 0 leaves the flags f; otherwise AF, OF
+   after counts above 1, and CF after SHL or SHR by the width or more come
+   from u. *)
 Definition shift_result_def:
   shift_result (u:eflags) (f:eflags) sz op (a:word64) (count:word8) =
     let c = w2n (count && (if sz = S64 then 63w else 31w));
@@ -1753,7 +1781,10 @@ Definition shift_result_def:
     in
       if c = 0 then (r, f)
       else
-        (r, <| CF := (if op = SHL then word_bit (n - c) a else word_bit (c - 1) a);
+        (r, <| CF := (if op = SAR then word_bit (c - 1) (sign_extend sz a)
+                      else if n ≤ c then u.CF
+                      else if op = SHL then word_bit (n - c) a
+                      else word_bit (c - 1) a);
                PF := even_parity r;
                AF := u.AF;
                ZF := (r = 0w);
@@ -1764,23 +1795,35 @@ Definition shift_result_def:
                       else F) |>)
 End
 
-(* Result and flags of rotating the size-masked a left (or right) by count,
-   masked to 5 bits (6 at 64 bits); only S32 and S64 are decoded, so the
-   masked count is below the width. A masked count of 0 leaves the flags f;
-   otherwise CF is the bit rotated last, OF is defined at count 1 and comes
-   from u above it, and PF, AF, ZF and SF keep their values. *)
+(* Result and flags of rotating the size-masked a by count, masked to 5 bits
+   (6 at 64 bits): ROL and ROR by the masked count modulo the width; RCL and
+   RCR rotate the width + 1 bits of CF and a, by the masked count modulo
+   width + 1. A masked count of 0 leaves the flags f; otherwise CF is the
+   bit rotated last (into CF, for RCL and RCR), OF is defined at count 1
+   and comes from u above it, and PF, AF, ZF and SF keep their values. *)
 Definition rotate_result_def:
-  rotate_result (u:eflags) (f:eflags) left sz (a:word64) (count:word8) =
+  rotate_result (u:eflags) (f:eflags) op sz (a:word64) (count:word8) =
     let c = w2n (count && (if sz = S64 then 63w else 31w));
         n = 8 * size_bytes sz;
-        r = (if left then (a << c) ‖ (a >>> (n - c)) else (a >>> c) ‖ (a << (n - c))) &&
-            size_mask sz
+        t = (if op = ROL ∨ op = ROR then c MOD n else c MOD (n + 1));
+        cin : word64 = if f.CF then 1w else 0w;
+        r = (case op of
+               ROL => (a << t) ‖ (a >>> (n - t))
+             | ROR => (a >>> t) ‖ (a << (n - t))
+             | RCL => if t = 0 then a else (a << t) ‖ (cin << (t - 1)) ‖ (a >>> (n + 1 - t))
+             | RCR => if t = 0 then a else (a >>> t) ‖ (cin << (n - t)) ‖ (a << (n + 1 - t))) &&
+            size_mask sz;
+        carry = (case op of
+                   ROL => word_bit 0 r
+                 | ROR => word_bit (n - 1) r
+                 | RCL => if t = 0 then f.CF else word_bit (n - t) a
+                 | RCR => if t = 0 then f.CF else word_bit (t - 1) a)
     in
       if c = 0 then (r, f)
       else
-        (r, f with <| CF := (if left then word_bit 0 r else word_bit (n - 1) r);
+        (r, f with <| CF := carry;
                       OF := (if c ≠ 1 then u.OF
-                             else if left then word_bit (n - 1) r ≠ word_bit 0 r
+                             else if op = ROL ∨ op = RCL then word_bit (n - 1) r ≠ carry
                              else word_bit (n - 1) r ≠ word_bit (n - 2) r) |>)
 End
 
@@ -1846,9 +1889,11 @@ QED
 
 Triviality rotate_count_mask:
   w2n ((ct:word8) && 31w) = w2n ct MOD 32 ∧
-  w2n (ct && 63w) = w2n ct MOD 64
+  w2n (ct && 63w) = w2n ct MOD 64 ∧
+  w2n (31w && ct) = w2n ct MOD 32 ∧
+  w2n (63w && ct) = w2n ct MOD 64
 Proof
-  Cases_on `ct` >>
+  ONCE_REWRITE_TAC [WORD_AND_COMM] >> Cases_on `ct` >>
   simp[SIMP_RULE (srw_ss()) [] (Q.SPEC `5` WORD_AND_EXP_SUB1),
        SIMP_RULE (srw_ss()) [] (Q.SPEC `6` WORD_AND_EXP_SUB1), w2n_n2w] >>
   `n MOD 32 < 32 ∧ n MOD 64 < 64` by simp[] >>
@@ -1862,7 +1907,7 @@ Proof
 QED
 
 Theorem rotate_result_value32:
-  FST (rotate_result u f left S32 (a && size_mask S32) ct) =
+  FST (rotate_result u f (if left then ROL else ROR) S32 (a && size_mask S32) ct) =
   (w2w (if left then (w2w a:word32) #<< (w2n ct MOD 32)
         else (w2w a:word32) #>> (w2n ct MOD 32)):word64)
 Proof
@@ -1872,21 +1917,22 @@ Proof
   Cases_on `left` >>
   PURE_REWRITE_TAC [rotate_result_def, LET_THM] >> BETA_TAC >>
   PURE_REWRITE_TAC [fst_same] >>
-  simp_tac bool_ss [EVAL ``S32 = S64``, rotate_count_mask, size_bytes_def, size_mask_def] >>
+  simp_tac (srw_ss()) [rotate_count_mask, size_bytes_def, size_mask_def] >>
   mp_tac (Q.INST [`x` |-> `w2w (a:word64):word32`, `n` |-> `w2n (ct:word8) MOD 32`]
            rotate32_shifts) >>
   simp[]
 QED
 
 Theorem rotate_result_value64:
-  FST (rotate_result u f left S64 (a && size_mask S64) ct) =
+  FST (rotate_result u f (if left then ROL else ROR) S64 (a && size_mask S64) ct) =
   if left then a #<< (w2n ct MOD 64) else a #>> (w2n ct MOD 64)
 Proof
   `size_mask S64 = (UINT_MAXw:word64)` by EVAL_TAC >>
   Cases_on `left` >>
   PURE_REWRITE_TAC [rotate_result_def, LET_THM] >> BETA_TAC >>
   PURE_REWRITE_TAC [fst_same] >>
-  asm_simp_tac bool_ss [rotate_count_mask, size_bytes_def, WORD_AND_CLAUSES] >>
+  pop_assum (fn th => PURE_REWRITE_TAC [th, WORD_AND_CLAUSES]) >>
+  simp_tac (srw_ss()) [rotate_count_mask, size_bytes_def] >>
   mp_tac (Q.INST [`x` |-> `a:word64`, `n` |-> `w2n (ct:word8) MOD 64`]
            (INST_TYPE [alpha |-> ``:64``] rotate_right_shifts)) >>
   mp_tac (Q.INST [`x` |-> `a:word64`, `n` |-> `w2n (ct:word8) MOD 64`]
@@ -1894,26 +1940,31 @@ Proof
   simp[WORD_AND_CLAUSES]
 QED
 
-(* 64-bit IMUL: CF and OF report signed overflow; SF, ZF, AF and PF come
-   from u. *)
+(* Two- and three-operand IMUL of the size-masked a and b: CF and OF report
+   a signed product that does not fit the size; SF, ZF, AF and PF come from
+   u. *)
 Definition imul_result_def:
-  imul_result (u:eflags) (a:word64) b =
-    let r = a * b;
-        overflow = ((sw2sw a * sw2sw b : word128) ≠ sw2sw r)
+  imul_result (u:eflags) sz (a:word64) b =
+    let r = (a * b) && size_mask sz;
+        overflow = ((sw2sw (sign_extend sz a) * sw2sw (sign_extend sz b) : word128) ≠
+                    sw2sw (sign_extend sz r))
     in
       (r, u with <| CF := overflow; OF := overflow |>)
 End
 
-(* One-operand MUL and IMUL: the high and low halves of the unsigned or
-   signed 128-bit product a * b. CF and OF report a high half that is not
-   the extension of the low half; SF, ZF, AF and PF come from u. *)
+(* One-operand MUL and IMUL: the high and low halves, each size-masked, of
+   the unsigned or signed double-size product of the size-masked a and b. CF
+   and OF report a high half that is not the extension of the low half;
+   SF, ZF, AF and PF come from u. *)
 Definition mul_wide_def:
-  mul_wide (u:eflags) signed (a:word64) (b:word64) =
-    let p : word128 = if signed then sw2sw a * sw2sw b else w2w a * w2w b;
-        lo : word64 = w2w p;
-        overflow = if signed then p ≠ sw2sw lo else p ≠ w2w lo
+  mul_wide (u:eflags) signed sz (a:word64) (b:word64) =
+    let p : word128 = if signed then sw2sw (sign_extend sz a) * sw2sw (sign_extend sz b)
+                      else w2w a * w2w b;
+        lo = (w2w p : word64) && size_mask sz;
+        hi = (w2w (p >>> (8 * size_bytes sz)) : word64) && size_mask sz;
+        overflow = if signed then p ≠ sw2sw (sign_extend sz lo) else hi ≠ 0w
     in
-      (w2w (p >>> 64) : word64, lo, u with <| CF := overflow; OF := overflow |>)
+      (hi, lo, u with <| CF := overflow; OF := overflow |>)
 End
 
 (* DIV and IDIV at size sz of the dividend hi:lo (each half size-masked)
@@ -1942,22 +1993,26 @@ Definition div_result_def:
       else SOME (n2w (a DIV b), n2w (a MOD b))
 End
 
-(* Result and flags of SHLD (left) or SHRD of d by count, masked to 6 bits,
-   shifting in bits of src. A masked count of 0 leaves d and the flags f;
-   otherwise AF, and OF after counts above 1, come from u. *)
+(* Result and flags of SHLD (left) or SHRD of the size-masked d by count,
+   masked to 5 bits (6 at 64 bits), shifting in bits of src. A masked count
+   of 0 leaves d and the flags f; otherwise AF, and OF after counts above 1,
+   come from u. At 16 bits a count above 16 leaves the result undefined;
+   execute_with does not take it here. *)
 Definition shift_double_result_def:
-  shift_double_result (u:eflags) (f:eflags) left (d:word64) (src:word64) (count:word8) =
-    let c = w2n (count && 63w);
-        r = if left then (d << c) ‖ (src >>> (64 - c)) else (d >>> c) ‖ (src << (64 - c))
+  shift_double_result (u:eflags) (f:eflags) left sz (d:word64) (src:word64) (count:word8) =
+    let c = w2n (count && (if sz = S64 then 63w else 31w));
+        n = 8 * size_bytes sz;
+        r = (if left then (d << c) ‖ (src >>> (n - c)) else (d >>> c) ‖ (src << (n - c))) &&
+            size_mask sz
     in
       if c = 0 then (d, f)
       else
-        (r, <| CF := (if left then word_bit (64 - c) d else word_bit (c - 1) d);
+        (r, <| CF := (if left then word_bit (n - c) d else word_bit (c - 1) d);
                PF := even_parity r;
                AF := u.AF;
                ZF := (r = 0w);
-               SF := word_bit 63 r;
-               OF := (if c = 1 then word_bit 63 r ≠ word_bit 63 d else u.OF) |>)
+               SF := sign_bit sz r;
+               OF := (if c = 1 then sign_bit sz r ≠ sign_bit sz d else u.OF) |>)
 End
 
 (* The zero bits of w below its lowest one bit, and above its highest one
@@ -2034,28 +2089,29 @@ Definition bit_count_result_def:
                  <| CF := F; PF := F; AF := F; ZF := (a = 0w); SF := F; OF := F |>)
 End
 
-(* The flags of ANDN, BZHI, BLSR, BLSI and BLSMSK on a 64-bit result r: SF
+(* The flags of ANDN, BZHI, BLSR, BLSI and BLSMSK on a size-sz result r: SF
    and ZF from r, CF as given, OF clear, and AF and PF from u. *)
 Definition bmi_flags_def:
-  bmi_flags (u:eflags) cf (r:word64) =
-    <| CF := cf; PF := u.PF; AF := u.AF; ZF := (r = 0w); SF := word_bit 63 r; OF := F |>
+  bmi_flags (u:eflags) sz cf (r:word64) =
+    <| CF := cf; PF := u.PF; AF := u.AF; ZF := (r = 0w); SF := sign_bit sz r; OF := F |>
 End
 
-(* BZHI: a with the bits from index n (the low byte of the index register)
-   up cleared, and whether n is past the top bit (CF). *)
+(* BZHI: the size-masked a with the bits from index n (the low byte of the
+   index register) up cleared, and whether n is past the top bit (CF). *)
 Definition bzhi_result_def:
-  bzhi_result (a:word64) (n:word8) =
-    if w2n n < 64 then (a && ((1w << w2n n) - 1w), F) else (a, T)
+  bzhi_result sz (a:word64) (n:word8) =
+    if w2n n < 8 * size_bytes sz then (a && ((1w << w2n n) - 1w), F) else (a, T)
 End
 
-(* BLSR, BLSI and BLSMSK of a, and CF. BLSMSK's result is never 0, so ZF
-   is clear after it, as the SDM has it. *)
+(* BLSR, BLSI and BLSMSK of a at size sz, and CF. BLSMSK's result is never 0,
+   so ZF is clear after it, as the SDM has it. *)
 Definition bls_result_def:
-  bls_result op (a:word64) =
-    case op of
-      BLSR => (a && (a - 1w), a = 0w)
-    | BLSI => (a && -a, a ≠ 0w)
-    | BLSMSK => (a ⊕ (a - 1w), a = 0w)
+  bls_result op sz (a:word64) =
+    let a = a && size_mask sz in
+      case op of
+        BLSR => ((a && (a - 1w)) && size_mask sz, a = 0w)
+      | BLSI => ((a && -a) && size_mask sz, a ≠ 0w)
+      | BLSMSK => ((a ⊕ (a - 1w)) && size_mask sz, a = 0w)
 End
 
 (* PDEP: the low bits of src deposited, lowest first, at the set bits of
@@ -2076,8 +2132,9 @@ Definition pext_aux_def:
 End
 
 Definition pdep_result_def:
-  pdep_result op src mask =
-    case op of PDEP => pdep_aux 64 src mask | PEXT => pext_aux 64 src mask
+  pdep_result op sz src mask =
+    let n = 8 * size_bytes sz in
+      case op of PDEP => pdep_aux n src mask | PEXT => pext_aux n src mask
 End
 
 (* BEXTR: len bits of src from bit start, where start is the control's
@@ -2096,9 +2153,9 @@ Definition bextr_flags_def:
 End
 
 Theorem blsmsk_nonzero:
-  FST (bls_result BLSMSK a) ≠ 0w
+  FST (bls_result BLSMSK sz a) ≠ 0w
 Proof
-  simp[bls_result_def] >> blastLib.BBLAST_TAC
+  Cases_on `sz` >> simp[bls_result_def, size_mask_def] >> blastLib.BBLAST_TAC
 QED
 
 (* Reflected CRC-32C (Castagnoli): consume the least significant source
@@ -2148,9 +2205,9 @@ Definition le_bytes_def:
   le_bytes (SUC n) w = w2w w :: le_bytes n (w >>> 8)
 End
 
-(* The bytes of w in the opposite order. *)
-Definition bswap64_def:
-  bswap64 (w:word64) = le_word (REVERSE (le_bytes 8 w))
+(* The low n bytes of w in the opposite order. *)
+Definition byte_swap_def:
+  byte_swap n (w:word64) = le_word (REVERSE (le_bytes n w))
 End
 
 Definition write_bytes_def:
@@ -2212,6 +2269,7 @@ End
 (* A register or a legacy SIMD memory operand that requires alignment. *)
 Definition read_aligned_xmm_def:
   read_aligned_xmm ops s len (RmReg r) = Next (read_xmm ops s r) ∧
+  read_aligned_xmm ops s len (RmHigh r) = Fault Unsupported ∧
   read_aligned_xmm ops s len (RmMem a) =
     let addr = address_of ops s len a in
       if addr && 15w ≠ 0w then Fault Alignment
@@ -2220,14 +2278,23 @@ Definition read_aligned_xmm_def:
            | SOME value => Next value
 End
 
+(* A size-sz value v written to register r: 8- and 16-bit writes keep the
+   other bits, 32-bit writes clear the upper half. *)
+Definition write_sized_def:
+  write_sized ops sz r v s = write_reg ops r (merge_reg sz (read_reg ops s r) v) s
+End
+
 Definition read_operand_def:
   read_operand ops sz s len (RmReg r) = SOME (read_reg ops s r && size_mask sz) ∧
+  read_operand ops sz s len (RmHigh r) = SOME ((read_reg ops s (w2w r) >>> 8) && 0xFFw) ∧
   read_operand ops sz s len (RmMem a) = load ops (size_bytes sz) (address_of ops s len a) s
 End
 
 Definition write_operand_def:
-  write_operand ops sz s len (RmReg r) v =
-    Next (write_reg ops r (merge_reg sz (read_reg ops s r) v) s) ∧
+  write_operand ops sz s len (RmReg r) v = Next (write_sized ops sz r v s) ∧
+  write_operand ops sz s len (RmHigh r) v =
+    Next (write_reg ops (w2w r)
+            ((read_reg ops s (w2w r) && ¬0xFF00w) ‖ ((v && 0xFFw) << 8)) s) ∧
   write_operand ops sz s len (RmMem a) v =
     store ops (size_bytes sz) (address_of ops s len a) v s
 End
@@ -2237,11 +2304,104 @@ Definition next_rip_def:
   next_rip len (Fault f) = Fault f
 End
 
+(* Push the low size-sz bytes of v. *)
+Definition push_def:
+  push ops sz (v:word64) s =
+    let sp = read_reg ops s 4w - n2w (size_bytes sz) in
+      case store ops (size_bytes sz) sp v s of
+        Next t => Next (write_reg ops 4w sp t)
+      | Fault f => Fault f
+End
+
+(* ENTER's copies of k enclosing frame pointers, read downwards from fp. *)
+Definition enter_frames_def:
+  enter_frames ops sz 0 (fp:word64) s = Next s ∧
+  enter_frames ops sz (SUC k) fp s =
+    let fp' = fp - n2w (size_bytes sz) in
+      case load ops (size_bytes sz) fp' s of
+        NONE => Fault Load
+      | SOME v =>
+          case push ops sz v s of
+            Next t => enter_frames ops sz k fp' t
+          | Fault f => Fault f
+End
+
+(* RFLAGS as PUSHF stores it: the status flags, DF, the reserved bit 1 and
+   IF, which is always set in user mode. *)
+Definition flags_word_def:
+  flags_word f df : word64 =
+    (if f.CF then 1w else 0w) ‖ 2w ‖ (if f.PF then 4w else 0w) ‖
+    (if f.AF then 0x10w else 0w) ‖ (if f.ZF then 0x40w else 0w) ‖
+    (if f.SF then 0x80w else 0w) ‖ 0x200w ‖ (if df then 0x400w else 0w) ‖
+    (if f.OF then 0x800w else 0w)
+End
+
+Definition word_flags_def:
+  word_flags (v:word64) =
+    <| CF := word_bit 0 v; PF := word_bit 2 v; AF := word_bit 4 v;
+       ZF := word_bit 6 v; SF := word_bit 7 v; OF := word_bit 11 v |>
+End
+
+(* One iteration of a string instruction, without moving RIP. RSI and RDI
+   step by the operand size, down when DF is set. *)
+Definition string_step_def:
+  string_step ops u op sz s =
+    let n = size_bytes sz;
+        d = (if s.df then -n2w n else n2w n);
+        si = read_reg ops s 6w; di = read_reg ops s 7w
+    in
+      case op of
+        MOVS =>
+          (case load ops n si s of
+             NONE => Fault Load
+           | SOME v =>
+               case store ops n di v s of
+                 Next t => Next (write_reg ops 7w (di + d) (write_reg ops 6w (si + d) t))
+               | Fault f => Fault f)
+      | CMPS =>
+          (case load ops n si s of
+             NONE => Fault Load
+           | SOME a =>
+               case load ops n di s of
+                 NONE => Fault Load
+               | SOME b =>
+                   Next (write_reg ops 7w (di + d) (write_reg ops 6w (si + d) s)
+                         with flags := SND (binop_result u F sz CMP a b)))
+      | STOS =>
+          (case store ops n di (read_reg ops s 0w) s of
+             Next t => Next (write_reg ops 7w (di + d) t)
+           | Fault f => Fault f)
+      | LODS =>
+          (case load ops n si s of
+             NONE => Fault Load
+           | SOME v => Next (write_reg ops 6w (si + d) (write_sized ops sz 0w v s)))
+      | SCAS =>
+          (case load ops n di s of
+             NONE => Fault Load
+           | SOME b =>
+               Next (write_reg ops 7w (di + d) s
+                     with flags := SND (binop_result u F sz CMP (read_reg ops s 0w && size_mask sz) b)))
+End
+
+(* The byte address of the operand-size unit holding bit offset off of a bit
+   string in memory, relative to its base. *)
+Definition bit_base_def:
+  bit_base sz (off:word64) = (sign_extend sz off >> 3) && ¬(n2w (size_bytes sz) - 1w)
+End
+
+Definition bt_result_def:
+  bt_result op (a:word64) i =
+    let m = (1w:word64) << i in
+      case op of BT => a | BTS => a ‖ m | BTR => a && ¬m | BTC => a ⊕ m
+End
+
 (* One instruction of len bytes at s.rip. Operand addresses are computed in
-   s, before RIP moves past the instruction. *)
+   s, before RIP moves past the instruction. Results the SDM leaves
+   undefined (BSF and BSR of 0, 16-bit SHLD and SHRD by more than 16, a
+   16-bit BSWAP) fault Unsupported. *)
 Definition execute_with_def:
-  execute_with ops u (MovImm r imm) len s =
-    Next (write_reg ops r (w2w imm) s with rip := s.rip + n2w len) ∧
+  execute_with ops u (MovImm sz d imm) len s =
+    next_rip len (write_operand ops sz s len d (imm && size_mask sz)) ∧
   execute_with ops u (Mov sz d src) len s =
     (case read_operand ops sz s len src of
        NONE => Fault Load
@@ -2263,24 +2423,22 @@ Definition execute_with_def:
          let (v, f) = binop_result u s.flags.CF sz op a (imm && size_mask sz) in
            next_rip len (if writes_result op then write_operand ops sz (s with flags := f) len d v
                          else Next (s with flags := f))) ∧
-  execute_with ops u (Movzx sz r src) len s =
-    (case read_operand ops sz s len src of
+  execute_with ops u (Movx signed dsz ssz r src) len s =
+    (case read_operand ops ssz s len src of
        NONE => Fault Load
-     | SOME v => Next (write_reg ops r v s with rip := s.rip + n2w len)) ∧
-  execute_with ops u (MovImm64 r imm) len s =
-    Next (write_reg ops r imm s with rip := s.rip + n2w len) ∧
-  execute_with ops u (Movsx r src) len s =
-    (case read_operand ops S8 s len src of
-       NONE => Fault Load
-     | SOME v => Next (write_reg ops r (sign_extend S8 v && 0xFFFFFFFFw) s with rip := s.rip + n2w len)) ∧
-  execute_with ops u (Movsxd r src) len s =
-    (case read_operand ops S32 s len src of
-       NONE => Fault Load
-     | SOME v => Next (write_reg ops r (sign_extend S32 v) s with rip := s.rip + n2w len)) ∧
-  execute_with ops u Cdqe len s =
-    Next (write_reg ops 0w (sign_extend S32 (read_reg ops s 0w)) s with rip := s.rip + n2w len) ∧
-  execute_with ops u (Lea r a) len s =
-    Next (write_reg ops r (address_of ops s len a) s with rip := s.rip + n2w len) ∧
+     | SOME v =>
+         Next (write_sized ops dsz r ((if signed then sign_extend ssz v else v) && size_mask dsz) s
+               with rip := s.rip + n2w len)) ∧
+  execute_with ops u (Cbw sz) len s =
+    (let h = (case sz of S16 => S8 | S32 => S16 | _ => S32) in
+       Next (write_sized ops sz 0w (sign_extend h (read_reg ops s 0w) && size_mask sz) s
+             with rip := s.rip + n2w len)) ∧
+  execute_with ops u (Cwd sz) len s =
+    Next (write_sized ops sz 2w (if sign_bit sz (read_reg ops s 0w) then size_mask sz else 0w) s
+          with rip := s.rip + n2w len) ∧
+  execute_with ops u (Lea sz r a) len s =
+    Next (write_sized ops sz r (address_of ops s len a && size_mask sz) s
+          with rip := s.rip + n2w len) ∧
   execute_with ops u (Not sz d) len s =
     (case read_operand ops sz s len d of
        NONE => Fault Load
@@ -2297,10 +2455,12 @@ Definition execute_with_def:
      | SOME a =>
          let (v, f) = binop_result u F sz ADD a 1w in
            next_rip len (write_operand ops sz (s with flags := (f with CF := s.flags.CF)) len d v)) ∧
-  execute_with ops u (Dec64 d) len s =
-    (let (v, f) = binop_result u F S64 SUB (read_reg ops s d) 1w in
-       Next (write_reg ops d v s
-             with <| flags := f with CF := s.flags.CF; rip := s.rip + n2w len |>)) ∧
+  execute_with ops u (Dec sz d) len s =
+    (case read_operand ops sz s len d of
+       NONE => Fault Load
+     | SOME a =>
+         let (v, f) = binop_result u F sz SUB a 1w in
+           next_rip len (write_operand ops sz (s with flags := (f with CF := s.flags.CF)) len d v)) ∧
   execute_with ops u (Shift op sz d count) len s =
     (case read_operand ops sz s len d of
        NONE => Fault Load
@@ -2309,118 +2469,359 @@ Definition execute_with_def:
              (v, f) = shift_result u s.flags sz op a c
          in
            next_rip len (write_operand ops sz (s with flags := f) len d v)) ∧
-  execute_with ops u (Rotate left sz r count) len s =
-    (let c = (case count of SOME c => c | NONE => w2w (read_reg ops s 1w));
-         (v, f) = rotate_result u s.flags left sz (read_reg ops s r && size_mask sz) c
-     in
-       Next (write_reg ops r (merge_reg sz (read_reg ops s r) v) s
-             with <| flags := f; rip := s.rip + n2w len |>)) ∧
-  execute_with ops u (Imul r src) len s =
-    (case read_operand ops S64 s len src of
+  execute_with ops u (Rotate op sz d count) len s =
+    (case read_operand ops sz s len d of
+       NONE => Fault Load
+     | SOME a =>
+         let c = (case count of SOME c => c | NONE => w2w (read_reg ops s 1w));
+             (v, f) = rotate_result u s.flags op sz a c
+         in
+           next_rip len (write_operand ops sz (s with flags := f) len d v)) ∧
+  execute_with ops u (Imul sz r src imm) len s =
+    (case read_operand ops sz s len src of
        NONE => Fault Load
      | SOME b =>
-         let (v, f) = imul_result u (read_reg ops s r) b in
-           Next (write_reg ops r v s with <| flags := f; rip := s.rip + n2w len |>)) ∧
-  execute_with ops u (MulWide signed r) len s =
-    (let (hi, lo, f) = mul_wide u signed (read_reg ops s 0w) (read_reg ops s r) in
-       Next (write_reg ops 2w hi (write_reg ops 0w lo s) with <| flags := f; rip := s.rip + n2w len |>)) ∧
-  execute_with ops u (Div signed sz r) len s =
-    (case div_result signed sz (read_reg ops s 2w) (read_reg ops s 0w) (read_reg ops s r) of
-       NONE => Fault Divide
-     | SOME (q, rm) =>
-         Next (write_reg ops 2w rm (write_reg ops 0w q s) with <| flags := u; rip := s.rip + n2w len |>)) ∧
-  execute_with ops u Cqo len s =
-    Next (write_reg ops 2w (if word_bit 63 (read_reg ops s 0w) then -1w else 0w) s
-          with rip := s.rip + n2w len) ∧
-  execute_with ops u (ShiftDouble left d src) len s =
-    (let (v, f) = shift_double_result u s.flags left (read_reg ops s d) (read_reg ops s src)
-                                      (w2w (read_reg ops s 1w))
-     in
-       Next (write_reg ops d v s with <| flags := f; rip := s.rip + n2w len |>)) ∧
-  execute_with ops u (Bswap r) len s =
-    Next (write_reg ops r (bswap64 (read_reg ops s r)) s with rip := s.rip + n2w len) ∧
-  execute_with ops u (Adx overflow d src) len s =
-    (let c = if overflow then s.flags.OF else s.flags.CF;
-         (r, carry) = adx_result c (read_reg ops s d) (read_reg ops s src);
-         f = if overflow then s.flags with OF := carry else s.flags with CF := carry
-     in
-       Next (write_reg ops d r s with <| flags := f; rip := s.rip + n2w len |>)) ∧
-  execute_with ops u (MovbeLoad d a) len s =
-    (case read_operand ops S64 s len (RmMem a) of
+         let a = (case imm of SOME v => v | NONE => read_reg ops s r) && size_mask sz;
+             (v, f) = imul_result u sz a b
+         in
+           Next (write_sized ops sz r v s with <| flags := f; rip := s.rip + n2w len |>)) ∧
+  execute_with ops u (MulWide signed sz src) len s =
+    (case read_operand ops sz s len src of
        NONE => Fault Load
-     | SOME v => Next (write_reg ops d (bswap64 v) s with rip := s.rip + n2w len)) ∧
-  execute_with ops u (MovbeStore a src) len s =
-    next_rip len (write_operand ops S64 s len (RmMem a) (bswap64 (read_reg ops s src))) ∧
-  execute_with ops u (Crc32 sz d src) len s =
+     | SOME b =>
+         let (hi, lo, f) = mul_wide u signed sz (read_reg ops s 0w && size_mask sz) b;
+             t = (if sz = S8 then write_sized ops S16 0w ((hi << 8) ‖ lo) s
+                  else write_sized ops sz 2w hi (write_sized ops sz 0w lo s))
+         in
+           Next (t with <| flags := f; rip := s.rip + n2w len |>)) ∧
+  execute_with ops u (Div signed sz src) len s =
+    (case read_operand ops sz s len src of
+       NONE => Fault Load
+     | SOME d =>
+         let a = read_reg ops s 0w;
+             hi = (if sz = S8 then a >>> 8 else read_reg ops s 2w)
+         in
+           case div_result signed sz hi a d of
+             NONE => Fault Divide
+           | SOME (q, r) =>
+               let t = (if sz = S8 then write_sized ops S16 0w ((r << 8) ‖ q) s
+                        else write_sized ops sz 2w r (write_sized ops sz 0w q s))
+               in
+                 Next (t with <| flags := u; rip := s.rip + n2w len |>)) ∧
+  execute_with ops u (ShiftDouble left sz d src count) len s =
+    (case read_operand ops sz s len d of
+       NONE => Fault Load
+     | SOME a =>
+         let c = (case count of SOME c => c | NONE => w2w (read_reg ops s 1w)) in
+           if sz = S16 ∧ 16 < w2n (c && 31w) then Fault Unsupported
+           else
+             let (v, f) = shift_double_result u s.flags left sz a
+                            (read_reg ops s src && size_mask sz) c
+             in
+               next_rip len (write_operand ops sz (s with flags := f) len d v)) ∧
+  execute_with ops u (Bswap sz r) len s =
+    (if sz = S16 then Fault Unsupported
+     else Next (write_sized ops sz r (byte_swap (size_bytes sz) (read_reg ops s r)) s
+                with rip := s.rip + n2w len)) ∧
+  execute_with ops u (Xchg sz a b) len s =
+    (case read_operand ops sz s len a of
+       NONE => Fault Load
+     | SOME va =>
+         case read_operand ops sz s len b of
+           NONE => Fault Load
+         | SOME vb =>
+             case write_operand ops sz s len a vb of
+               Next t => next_rip len (write_operand ops sz t len b va)
+             | Fault f => Fault f) ∧
+  execute_with ops u (Xadd sz d src) len s =
+    (case read_operand ops sz s len d of
+       NONE => Fault Load
+     | SOME a =>
+         case read_operand ops sz s len src of
+           NONE => Fault Load
+         | SOME b =>
+             let (v, f) = binop_result u F sz ADD a b; s' = s with flags := f in
+               (* A memory destination is stored first, at the address its
+                  registers give before the source register changes; a
+                  register destination is written last, so that XADD r, r
+                  leaves the sum. *)
+               case d of
+                 RmMem _ =>
+                   (case write_operand ops sz s' len d v of
+                      Next t => next_rip len (write_operand ops sz t len src a)
+                    | Fault e => Fault e)
+               | _ =>
+                   (case write_operand ops sz s' len src a of
+                      Next t => next_rip len (write_operand ops sz t len d v)
+                    | Fault e => Fault e)) ∧
+  execute_with ops u (Cmpxchg sz d src) len s =
+    (case read_operand ops sz s len d of
+       NONE => Fault Load
+     | SOME a =>
+         case read_operand ops sz s len src of
+           NONE => Fault Load
+         | SOME b =>
+             let acc = read_reg ops s 0w && size_mask sz;
+                 f = SND (binop_result u F sz CMP acc a)
+             in
+               if acc = a then next_rip len (write_operand ops sz (s with flags := f) len d b)
+               else
+                 (* On failure only a memory destination is written (back);
+                    a register keeps its upper half. *)
+                 case (case d of
+                         RmMem _ => write_operand ops sz (s with flags := f) len d a
+                       | _ => Next (s with flags := f)) of
+                   Next t => Next (write_sized ops sz 0w a t with rip := s.rip + n2w len)
+                 | Fault e => Fault e) ∧
+  execute_with ops u (Cmpxchg2 wide m) len s =
+    (let addr = address_of ops s len m;
+         lo = read_reg ops s 0w; hi = read_reg ops s 2w
+     in
+       if wide then
+         if addr && 15w ≠ 0w then Fault Alignment
+         else
+           case load128 ops addr s of
+             NONE => Fault Load
+           | SOME v =>
+               let same = (v = (w2w hi << 64) ‖ w2w lo) in
+                 case store128 ops addr
+                        (if same then (w2w (read_reg ops s 1w) << 64) ‖ w2w (read_reg ops s 3w) else v) s of
+                   Fault f => Fault f
+                 | Next t =>
+                     let t = (if same then t else write_reg ops 2w (w2w (v >>> 64)) (write_reg ops 0w (w2w v) t)) in
+                       Next (t with <| flags := t.flags with ZF := same; rip := s.rip + n2w len |>)
+       else
+         case load ops 8 addr s of
+           NONE => Fault Load
+         | SOME v =>
+             let same = (v = (hi << 32) ‖ (lo && 0xFFFFFFFFw)) in
+               case store ops 8 addr
+                      (if same then (read_reg ops s 1w << 32) ‖ (read_reg ops s 3w && 0xFFFFFFFFw) else v) s of
+                 Fault f => Fault f
+               | Next t =>
+                   let t = (if same then t else write_reg ops 2w (v >>> 32) (write_reg ops 0w (v && 0xFFFFFFFFw) t)) in
+                     Next (t with <| flags := t.flags with ZF := same; rip := s.rip + n2w len |>)) ∧
+  execute_with ops u (Bt op sz d r) len s =
+    (let off = read_reg ops s r && size_mask sz;
+         i = w2n off MOD (8 * size_bytes sz);
+         m = (case d of RmMem a => RmMem (Mem NONE NONE 0w (address_of ops s len a + bit_base sz off))
+                      | _ => d)
+     in
+       case read_operand ops sz s len m of
+         NONE => Fault Load
+       | SOME a =>
+           let f = u with <| CF := word_bit i a; ZF := s.flags.ZF |> in
+             if op = BT then Next (s with <| flags := f; rip := s.rip + n2w len |>)
+             else next_rip len (write_operand ops sz (s with flags := f) len m (bt_result op a i))) ∧
+  execute_with ops u (BtImm op sz d imm) len s =
+    (case read_operand ops sz s len d of
+       NONE => Fault Load
+     | SOME a =>
+         let i = w2n imm MOD (8 * size_bytes sz);
+             f = u with <| CF := word_bit i a; ZF := s.flags.ZF |>
+         in
+           if op = BT then Next (s with <| flags := f; rip := s.rip + n2w len |>)
+           else next_rip len (write_operand ops sz (s with flags := f) len d (bt_result op a i))) ∧
+  execute_with ops u (BitScan rev sz r src) len s =
+    (case read_operand ops sz s len src of
+       NONE => Fault Load
+     | SOME a =>
+         let n = 8 * size_bytes sz in
+           if a = 0w then Fault Unsupported
+           else
+             Next (write_sized ops sz r
+                     (n2w (if rev then n - 1 - leading_zeros n a else trailing_zeros n a)) s
+                   with <| flags := u with ZF := F; rip := s.rip + n2w len |>)) ∧
+  execute_with ops u (BitCount op sz r src) len s =
+    (case read_operand ops sz s len src of
+       NONE => Fault Load
+     | SOME a =>
+         let (v, f) = bit_count_result u op (8 * size_bytes sz) a in
+           Next (write_sized ops sz r v s with <| flags := f; rip := s.rip + n2w len |>)) ∧
+  execute_with ops u (Adx overflow sz r src) len s =
+    (case read_operand ops sz s len src of
+       NONE => Fault Load
+     | SOME b =>
+         let c = (if overflow then s.flags.OF else s.flags.CF);
+             (v, carry) = adx_result c sz (read_reg ops s r && size_mask sz) b;
+             f = (if overflow then s.flags with OF := carry else s.flags with CF := carry)
+         in
+           Next (write_sized ops sz r v s with <| flags := f; rip := s.rip + n2w len |>)) ∧
+  execute_with ops u (Movbe sz d src) len s =
+    (case read_operand ops sz s len src of
+       NONE => Fault Load
+     | SOME v => next_rip len (write_operand ops sz s len d (byte_swap (size_bytes sz) v))) ∧
+  execute_with ops u (Crc32 sz r src) len s =
     (case read_operand ops sz s len src of
        NONE => Fault Load
      | SOME v =>
-         Next (write_reg ops d (w2w (crc32c_bits (8 * size_bytes sz) (w2w (read_reg ops s d)) v)) s
+         Next (write_reg ops r (w2w (crc32c_bits (8 * size_bytes sz) (w2w (read_reg ops s r)) v)) s
                with rip := s.rip + n2w len)) ∧
-  execute_with ops u (BitCount op sz d src) len s =
-    (let (v, f) = bit_count_result u op (8 * size_bytes sz) (read_reg ops s src && size_mask sz) in
-       Next (write_reg ops d v s with <| flags := f; rip := s.rip + n2w len |>)) ∧
   execute_with ops u (Cmov cc sz r src) len s =
     (case read_operand ops sz s len src of
        NONE => Fault Load
      | SOME v =>
-         next_rip len (write_operand ops sz s len (RmReg r)
-                         (if condition cc s.flags then v else read_reg ops s r))) ∧
+         Next (write_sized ops sz r (if condition cc s.flags then v else read_reg ops s r) s
+               with rip := s.rip + n2w len)) ∧
   execute_with ops u (Setcc cc d) len s =
     next_rip len (write_operand ops S8 s len d (if condition cc s.flags then 1w else 0w)) ∧
-  execute_with ops u (Mulx hi lo src) len s =
-    (case read_operand ops S64 s len src of
+  execute_with ops u (Mulx sz hi lo src) len s =
+    (case read_operand ops sz s len src of
        NONE => Fault Load
      | SOME b =>
-         let (h, l, f) = mul_wide u F (read_reg ops s 2w) b in
-           Next (write_reg ops hi h (write_reg ops lo l s) with rip := s.rip + n2w len)) ∧
+         let (h, l, f) = mul_wide u F sz (read_reg ops s 2w && size_mask sz) b in
+           Next (write_sized ops sz hi h (write_sized ops sz lo l s) with rip := s.rip + n2w len)) ∧
   execute_with ops u (Rorx sz d src imm) len s =
-    Next (write_reg ops d (FST (rotate_result u s.flags F sz (read_reg ops s src && size_mask sz) imm)) s
-          with rip := s.rip + n2w len) ∧
-  execute_with ops u (ShiftX op d src cnt) len s =
-    Next (write_reg ops d (FST (shift_result u s.flags S64 op (read_reg ops s src)
-                                             (w2w (read_reg ops s cnt)))) s
-          with rip := s.rip + n2w len) ∧
-  execute_with ops u (Andn d a b) len s =
-    (let r = ¬read_reg ops s a && read_reg ops s b in
-       Next (write_reg ops d r s with <| flags := bmi_flags u F r; rip := s.rip + n2w len |>)) ∧
-  execute_with ops u (Bzhi d a n) len s =
-    (let (r, cf) = bzhi_result (read_reg ops s a) (w2w (read_reg ops s n)) in
-       Next (write_reg ops d r s with <| flags := bmi_flags u cf r; rip := s.rip + n2w len |>)) ∧
-  execute_with ops u (Bls op d a) len s =
-    (let (r, cf) = bls_result op (read_reg ops s a) in
-       Next (write_reg ops d r s with <| flags := bmi_flags u cf r; rip := s.rip + n2w len |>)) ∧
-  execute_with ops u (Pdep op d a mask) len s =
-    Next (write_reg ops d (pdep_result op (read_reg ops s a) (read_reg ops s mask)) s
-          with rip := s.rip + n2w len) ∧
-  execute_with ops u (Bextr d a c) len s =
-    (let r = bextr_result (read_reg ops s a) (read_reg ops s c) in
-       Next (write_reg ops d r s with <| flags := bextr_flags u r; rip := s.rip + n2w len |>)) ∧
-  execute_with ops u (Push r) len s =
-    (let sp = read_reg ops s 4w - 8w in
-       case store ops 8 sp (read_reg ops s r) s of
-         Next t => Next (write_reg ops 4w sp t with rip := s.rip + n2w len)
-       | Fault f => Fault f) ∧
-  execute_with ops u (Pop r) len s =
+    (case read_operand ops sz s len src of
+       NONE => Fault Load
+     | SOME a =>
+         Next (write_sized ops sz d (FST (rotate_result u s.flags ROR sz a imm)) s
+               with rip := s.rip + n2w len)) ∧
+  execute_with ops u (ShiftX op sz d src cnt) len s =
+    (case read_operand ops sz s len src of
+       NONE => Fault Load
+     | SOME a =>
+         Next (write_sized ops sz d (FST (shift_result u s.flags sz op a (w2w (read_reg ops s cnt)))) s
+               with rip := s.rip + n2w len)) ∧
+  execute_with ops u (Andn sz d a src) len s =
+    (case read_operand ops sz s len src of
+       NONE => Fault Load
+     | SOME b =>
+         let r = ¬read_reg ops s a && b in
+           Next (write_sized ops sz d r s with <| flags := bmi_flags u sz F r; rip := s.rip + n2w len |>)) ∧
+  execute_with ops u (Bzhi sz d src n) len s =
+    (case read_operand ops sz s len src of
+       NONE => Fault Load
+     | SOME a =>
+         let (r, cf) = bzhi_result sz a (w2w (read_reg ops s n)) in
+           Next (write_sized ops sz d r s with <| flags := bmi_flags u sz cf r; rip := s.rip + n2w len |>)) ∧
+  execute_with ops u (Bls op sz d src) len s =
+    (case read_operand ops sz s len src of
+       NONE => Fault Load
+     | SOME a =>
+         let (r, cf) = bls_result op sz a in
+           Next (write_sized ops sz d r s with <| flags := bmi_flags u sz cf r; rip := s.rip + n2w len |>)) ∧
+  execute_with ops u (Pdep op sz d a src) len s =
+    (case read_operand ops sz s len src of
+       NONE => Fault Load
+     | SOME mask =>
+         Next (write_sized ops sz d (pdep_result op sz (read_reg ops s a && size_mask sz) mask) s
+               with rip := s.rip + n2w len)) ∧
+  execute_with ops u (Bextr sz d src c) len s =
+    (case read_operand ops sz s len src of
+       NONE => Fault Load
+     | SOME a =>
+         let r = bextr_result a (read_reg ops s c && size_mask sz) in
+           Next (write_sized ops sz d r s with <| flags := bextr_flags u r; rip := s.rip + n2w len |>)) ∧
+  execute_with ops u (Push sz src) len s =
+    (case read_operand ops sz s len src of
+       NONE => Fault Load
+     | SOME v => next_rip len (push ops sz v s)) ∧
+  execute_with ops u (PushImm sz v) len s = next_rip len (push ops sz v s) ∧
+  execute_with ops u (Pop sz d) len s =
     (let sp = read_reg ops s 4w in
-       case load ops 8 sp s of
+       case load ops (size_bytes sz) sp s of
          NONE => Fault Load
-       | SOME v => Next (write_reg ops r v (write_reg ops 4w (sp + 8w) s)
-                         with rip := s.rip + n2w len)) ∧
+       | SOME v =>
+           next_rip len (write_operand ops sz (write_reg ops 4w (sp + n2w (size_bytes sz)) s) len d v)) ∧
+  execute_with ops u (Pushf sz) len s = next_rip len (push ops sz (flags_word s.flags s.df) s) ∧
+  execute_with ops u (Popf sz) len s =
+    (let sp = read_reg ops s 4w in
+       case load ops (size_bytes sz) sp s of
+         NONE => Fault Load
+       | SOME v =>
+           if v && 0x244100w ≠ 0w then Fault Unsupported
+           else
+             Next (write_reg ops 4w (sp + n2w (size_bytes sz)) s
+                   with <| flags := word_flags v; df := word_bit 10 v; rip := s.rip + n2w len |>)) ∧
+  execute_with ops u Lahf len s =
+    next_rip len (write_operand ops S8 s len (RmHigh 0w) (flags_word s.flags s.df && 0xFFw)) ∧
+  execute_with ops u Sahf len s =
+    (let v = (read_reg ops s 0w >>> 8) && 0xFFw ‖ (if s.flags.OF then 0x800w else 0w) in
+       Next (s with <| flags := word_flags v; rip := s.rip + n2w len |>)) ∧
+  execute_with ops u (FlagOp op) len s =
+    Next ((case op of
+             CLC => s with flags := s.flags with CF := F
+           | STC => s with flags := s.flags with CF := T
+           | CMC => s with flags := s.flags with CF := ¬s.flags.CF
+           | CLD => s with df := F
+           | STD => s with df := T) with rip := s.rip + n2w len) ∧
+  execute_with ops u (Leave sz) len s =
+    (let sp = read_reg ops s 5w in
+       case load ops (size_bytes sz) sp s of
+         NONE => Fault Load
+       | SOME v =>
+           Next (write_sized ops sz 5w v (write_reg ops 4w (sp + n2w (size_bytes sz)) s)
+                 with rip := s.rip + n2w len)) ∧
+  execute_with ops u (Enter sz alloc level) len s =
+    (let fp = read_reg ops s 5w; l = w2n level MOD 32 in
+       case push ops sz fp s of
+         Fault f => Fault f
+       | Next t =>
+           let frame = read_reg ops t 4w in
+             case (if l = 0 then Next t
+                   else case enter_frames ops sz (l - 1) fp t of
+                          Next t' => push ops sz frame t'
+                        | Fault f => Fault f) of
+               Fault f => Fault f
+             | Next t' =>
+                 let sp = read_reg ops t' 4w - w2w alloc in
+                   (* ENTER faults if a write at the final stack pointer would. *)
+                   if access_ok ops Write (size_bytes sz) t' sp then
+                     Next (write_reg ops 4w sp (write_sized ops sz 5w frame t')
+                           with rip := s.rip + n2w len)
+                   else Fault Store) ∧
   execute_with ops u (Call d) len s =
-    (let sp = read_reg ops s 4w - 8w; ret = s.rip + n2w len in
-       case store ops 8 sp ret s of
-         Next t => Next (write_reg ops 4w sp t with rip := ret + d)
+    (let ret = s.rip + n2w len in
+       case push ops S64 ret s of
+         Next t => Next (t with rip := ret + d)
        | Fault f => Fault f) ∧
+  execute_with ops u (CallInd src) len s =
+    (case read_operand ops S64 s len src of
+       NONE => Fault Load
+     | SOME target =>
+         case push ops S64 (s.rip + n2w len) s of
+           Next t => Next (t with rip := target)
+         | Fault f => Fault f) ∧
   execute_with ops u (Jcc cc d) len s =
     Next (s with rip := s.rip + n2w len + (if condition cc s.flags then d else 0w)) ∧
   execute_with ops u (Jmp d) len s = Next (s with rip := s.rip + n2w len + d) ∧
-  execute_with ops u (JmpReg r) len s = Next (s with rip := read_reg ops s r) ∧
-  execute_with ops u Ret len s =
+  execute_with ops u (JmpInd src) len s =
+    (case read_operand ops S64 s len src of
+       NONE => Fault Load
+     | SOME target => Next (s with rip := target)) ∧
+  execute_with ops u (Loop op d) len s =
+    (let c = read_reg ops s 1w in
+       if op = JRCXZ then
+         Next (s with rip := s.rip + n2w len + (if c = 0w then d else 0w))
+       else
+         let c = c - 1w;
+             taken = (c ≠ 0w ∧ (op = LOOP ∨ (op = LOOPE ⇔ s.flags.ZF)))
+         in
+           Next (write_reg ops 1w c s with rip := s.rip + n2w len + (if taken then d else 0w))) ∧
+  execute_with ops u (Ret n) len s =
     (let sp = read_reg ops s 4w in
        case load ops 8 sp s of
          NONE => Fault Load
-       | SOME v => Next (write_reg ops 4w (sp + 8w) s with rip := v)) ∧
+       | SOME v => Next (write_reg ops 4w (sp + 8w + w2w n) s with rip := v)) ∧
+  execute_with ops u Xlat len s =
+    (case load ops 1 (read_reg ops s 3w + (read_reg ops s 0w && 0xFFw)) s of
+       NONE => Fault Load
+     | SOME v => Next (write_sized ops S8 0w v s with rip := s.rip + n2w len)) ∧
+  execute_with ops u (StringOp op sz rep) len s =
+    (let c = read_reg ops s 1w in
+       if rep ≠ NoRep ∧ c = 0w then Next (s with rip := s.rip + n2w len)
+       else
+         case string_step ops u op sz s of
+           Fault f => Fault f
+         | Next t =>
+             if rep = NoRep then Next (t with rip := s.rip + n2w len)
+             else
+               let c = c - 1w;
+                   t = write_reg ops 1w c t;
+                   stop = (c = 0w ∨ (op = CMPS ∨ op = SCAS) ∧ (rep = RepE ⇔ ¬t.flags.ZF))
+               in
+                 Next (if stop then t with rip := s.rip + n2w len else t)) ∧
   execute_with ops u Nop len s = Next (s with rip := s.rip + n2w len) ∧
   execute_with ops u (VecLoad aligned x a) len s =
     (let addr = address_of ops s len a in

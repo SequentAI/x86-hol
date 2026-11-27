@@ -1,14 +1,17 @@
 # x86-hol
 
 An executable HOL4 model of x86-64 user-space instructions. It covers
-a subset of integer, SIMD and cryptographic instructions and rejects
-unsupported encodings.
+the general-purpose integer instructions of 64-bit user mode (the
+x86-64-v2 base with BMI1, BMI2, ADX, MOVBE and CRC32) and a subset of
+SIMD and cryptographic instructions, and rejects unsupported encodings.
 
 `x86Isa` defines instruction decoding and execution over a storage
 interface. Its state includes general-purpose and XMM registers, the
-instruction pointer, six boolean status flags, and byte-addressed memory
+instruction pointer, six boolean status flags, the direction flag, and byte-addressed memory
 with read, write and execute permissions. Each step takes its undefined
-flag values from an indexed stream. `x86IsaCv` instantiates the model
+flag values from an indexed stream. A REP string instruction does one
+iteration per step, decrementing RCX and leaving the instruction pointer
+on itself until it finishes. `x86IsaCv` instantiates the model
 with sparse trees, translates it with `cv_trans` for `cv_eval`, and
 proves that the executable step refines the functional model.
 
@@ -47,8 +50,10 @@ independently of the test cases. It sweeps the 64-bit encoding space,
 groups the words XED accepts by instruction form (iform), decodes a
 sample of each form in HOL4 and with `llvm-objdump`, and reports, per
 tier of the instruction set, the forms the model covers and any word it
-accepts that XED or `llvm-objdump` rejects or reads differently. It
-fetches and builds XED at a pinned commit on first use.
+accepts that XED or `llvm-objdump` rejects or reads differently. Words
+that XED and the model read alike but `llvm-objdump` alone rejects, such
+as some valid legacy prefix orders, are listed apart as reference
+disagreements. It fetches and builds XED at a pinned commit on first use.
 
 ```sh
 python3 tools/x86_coverage.py --json coverage.json

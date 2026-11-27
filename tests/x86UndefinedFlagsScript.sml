@@ -28,7 +28,12 @@
    cleared; AF and PF undefined after all five. x86_PEXT writes no flag;
    s2n-bignum has no PDEP or BEXTR, and the SDM has PDEP write none and
    BEXTR set ZF from the result, clear CF and OF, and leave AF, SF and PF
-   undefined. *)
+   undefined. x86_RCL and x86_RCR treat the flags as x86_ROL and x86_ROR
+   do. x86_BT, x86_BTC, x86_BTR and x86_BTS set CF to the selected bit and
+   leave ZF, SF, PF, OF and AF undefined; the Intel SDM leaves ZF
+   unaffected, as the model does. x86_BSF and x86_BSR set ZF and leave CF,
+   OF, SF, PF and AF undefined. XADD, CMPXCHG, CMPS and SCAS set the flags
+   as ADD and CMP do; CMPXCHG8B and CMPXCHG16B write ZF only (Intel SDM). *)
 Theory x86UndefinedFlags
 Ancestors x86Isa
 
@@ -57,92 +62,112 @@ Proof
   rw[shift_result_def]
 QED
 
-(* Otherwise u reaches AF always and OF unless the masked count is 1. *)
+(* Otherwise u reaches AF always, OF unless the masked count is 1, and CF
+   after SHL or SHR by the operand width or more (8- and 16-bit only). *)
 Theorem shift_undefined_flags:
   w2n (k && (if sz = S64 then 63w else 31w)) ≠ 0 ⇒
   (SND (shift_result u f sz op a k)).AF = u.AF ∧
   (w2n (k && (if sz = S64 then 63w else 31w)) ≠ 1 ⇒
-   (SND (shift_result u f sz op a k)).OF = u.OF)
+   (SND (shift_result u f sz op a k)).OF = u.OF) ∧
+  (op ≠ SAR ∧ 8 * size_bytes sz ≤ w2n (k && (if sz = S64 then 63w else 31w)) ⇒
+   (SND (shift_result u f sz op a k)).CF = u.CF)
 Proof
   rw[shift_result_def, LET_THM]
 QED
 
-Theorem shift_undefined_af_of_only:
-  u.AF = u'.AF ∧ u.OF = u'.OF ⇒ shift_result u = shift_result u'
+Theorem shift_undefined_af_of_cf_only:
+  u.AF = u'.AF ∧ u.OF = u'.OF ∧ u.CF = u'.CF ⇒ shift_result u = shift_result u'
 Proof
   rw[FUN_EQ_THM, shift_result_def]
+QED
+
+Triviality masked_count_bound:
+  ¬(32 ≤ w2n (31w && (k:word8))) ∧ ¬(32 ≤ w2n (k && 31w)) ∧
+  ¬(64 ≤ w2n (63w && k)) ∧ ¬(64 ≤ w2n (k && 63w))
+Proof
+  `31w && k <₊ 32w ∧ k && 31w <₊ 32w ∧ 63w && k <₊ 64w ∧ k && 63w <₊ (64w:word8)` by
+    blastLib.BBLAST_TAC >>
+  fs[wordsTheory.WORD_LO, arithmeticTheory.NOT_LESS_EQUAL]
 QED
 
 Triviality write_operand_flags:
   next_rip len (write_operand ops sz s len d v) = Next t ⇒ t.flags = s.flags
 Proof
-  Cases_on `d` >> rw[write_operand_def, store_def, next_rip_def, write_reg_def] >>
+  Cases_on `d` >> rw[write_operand_def, store_def, next_rip_def, write_sized_def, write_reg_def] >>
   simp[x86_machine_accfupds, write_bytes_fields]
 QED
 
-(* NOT, MOVSX, MOV of a sign-extended immediate, SETcc and CMOVcc leave
-   the flags as they were. *)
+(* NOT, MOVZX, MOVSX, MOV of an immediate, SETcc and CMOVcc leave the flags
+   as they were. *)
 Theorem flags_unchanged:
-  (i = Not sz d ∨ i = Movsx r src ∨ i = MovImm64 r v ∨ i = Setcc cc d ∨ i = Cmov cc sz r src) ∧
+  (i = Not sz d ∨ i = Movx sg dsz sz r src ∨ i = MovImm sz d v ∨ i = Setcc cc d ∨
+   i = Cmov cc sz r src) ∧
   execute_with ops u i len s = Next t ⇒ t.flags = s.flags
 Proof
   rw[] >> gvs[execute_with_def, AllCaseEqs()] >>
-  imp_res_tac write_operand_flags >> gvs[write_reg_def, x86_machine_accfupds]
+  imp_res_tac write_operand_flags >> gvs[write_sized_def, write_reg_def, x86_machine_accfupds]
 QED
 
 (* IMUL defines CF and OF and leaves the rest to u. *)
 Theorem imul_undefined_flags:
-  SND (imul_result u a b) with <| CF := F; OF := F |> = u with <| CF := F; OF := F |>
+  SND (imul_result u sz a b) with <| CF := F; OF := F |> = u with <| CF := F; OF := F |>
 Proof
   rw[imul_result_def, LET_THM]
 QED
 
 (* MUL and IMUL with one operand: the same. *)
 Theorem mul_wide_undefined_flags:
-  SND (SND (mul_wide u sg a b)) with <| CF := F; OF := F |> = u with <| CF := F; OF := F |>
+  SND (SND (mul_wide u sg sz a b)) with <| CF := F; OF := F |> = u with <| CF := F; OF := F |>
 Proof
   rw[mul_wide_def, LET_THM]
 QED
 
 (* DIV and IDIV take every flag from u. *)
 Theorem div_undefined_flags:
-  execute_with ops u (Div sg sz r) len s = Next t ⇒ t.flags = u
+  execute_with ops u (Div sg sz src) len s = Next t ⇒ t.flags = u
 Proof
-  rw[execute_with_def, AllCaseEqs()] >> simp[write_reg_def]
+  rw[execute_with_def, AllCaseEqs()] >> gvs[AllCaseEqs()] >>
+  pairarg_tac >> gvs[] >> rw[] >> simp[write_sized_def, write_reg_def]
 QED
 
-(* SHLD and SHRD: as the single shifts, at 64 bits. *)
+(* SHLD and SHRD: as the single shifts. *)
 Theorem shift_double_zero_count_flags:
-  w2n (k && 63w) = 0 ⇒ SND (shift_double_result u f left a b k) = f
+  w2n (k && (if sz = S64 then 63w else 31w)) = 0 ⇒
+  SND (shift_double_result u f left sz a b k) = f
 Proof
   rw[shift_double_result_def]
 QED
 
 Theorem shift_double_undefined_flags:
-  w2n (k && 63w) ≠ 0 ⇒
-  (SND (shift_double_result u f left a b k)).AF = u.AF ∧
-  (w2n (k && 63w) ≠ 1 ⇒ (SND (shift_double_result u f left a b k)).OF = u.OF)
+  w2n (k && (if sz = S64 then 63w else 31w)) ≠ 0 ⇒
+  (SND (shift_double_result u f left sz a b k)).AF = u.AF ∧
+  (w2n (k && (if sz = S64 then 63w else 31w)) ≠ 1 ⇒
+   (SND (shift_double_result u f left sz a b k)).OF = u.OF)
 Proof
   rw[shift_double_result_def, LET_THM]
 QED
 
-(* ROL and ROR: a masked count of 0 leaves the flags f; otherwise they
-   change CF and OF only, OF from u unless the masked count is 1. *)
+(* ROL, ROR, RCL and RCR: a masked count of 0 leaves the flags f;
+   otherwise they change CF and OF only, OF from u unless the masked count
+   is 1. *)
 Theorem rotate_zero_count_flags:
   w2n (k && (if sz = S64 then 63w else 31w)) = 0 ⇒
-  SND (rotate_result u f left sz a k) = f
+  SND (rotate_result u f op sz a k) = f
 Proof
   rw[rotate_result_def]
 QED
 
 Theorem rotate_undefined_flags:
   w2n (k && (if sz = S64 then 63w else 31w)) ≠ 0 ⇒
-  SND (rotate_result u f left sz a k) with <| CF := F; OF := F |> =
+  SND (rotate_result u f op sz a k) with <| CF := F; OF := F |> =
     f with <| CF := F; OF := F |> ∧
   (w2n (k && (if sz = S64 then 63w else 31w)) ≠ 1 ⇒
-   (SND (rotate_result u f left sz a k)).OF = u.OF)
+   (SND (rotate_result u f op sz a k)).OF = u.OF)
 Proof
-  rw[rotate_result_def, LET_THM]
+  PURE_REWRITE_TAC [rotate_result_def, LET_THM] >> BETA_TAC >> strip_tac >>
+  ASM_REWRITE_TAC [pairTheory.SND] >>
+  qmatch_goalsub_abbrev_tac `f with <|CF := cy; OF := ov|>` >>
+  simp[Abbr `ov`]
 QED
 
 (* TZCNT and LZCNT define CF and ZF and leave the rest to u; POPCNT takes
@@ -169,12 +194,16 @@ QED
 
 Theorem shift_agrees:
   (w2n (k && (if sz = S64 then 63w else 31w)) ≠ 0 ⇒ u.AF = u'.AF) ∧
-  (1 < w2n (k && (if sz = S64 then 63w else 31w)) ⇒ u.OF = u'.OF) ⇒
+  (1 < w2n (k && (if sz = S64 then 63w else 31w)) ⇒ u.OF = u'.OF) ∧
+  (op ≠ SAR ∧ 8 * size_bytes sz ≤ w2n (k && (if sz = S64 then 63w else 31w)) ⇒ u.CF = u'.CF) ⇒
   shift_result u f sz op a k = shift_result u' f sz op a k
 Proof
-  rw[shift_result_def, LET_THM] >> ASM_REWRITE_TAC[] >>
-  first_x_assum irule >> qmatch_goalsub_abbrev_tac `1 < w2n m` >>
-  `w2n m ≠ 0` by simp[wordsTheory.w2n_eq_0] >> decide_tac
+  strip_tac >> simp[shift_result_def, LET_THM] >>
+  qabbrev_tac `c = w2n (k && (if sz = S64 then 63w else 31w))` >>
+  IF_CASES_TAC >- simp[] >>
+  `c ≠ 0` by gvs[Abbr `c`] >>
+  `c ≠ 1 ⇒ (u.OF ⇔ u'.OF)` by (strip_tac >> first_x_assum irule >> decide_tac) >>
+  rw[] >> gvs[]
 QED
 
 Theorem imul_agrees:
@@ -192,21 +221,27 @@ Proof
 QED
 
 Theorem shift_double_agrees:
-  (w2n (k && 63w) ≠ 0 ⇒ u.AF = u'.AF) ∧ (1 < w2n (k && 63w) ⇒ u.OF = u'.OF) ⇒
-  shift_double_result u f left a b k = shift_double_result u' f left a b k
+  (w2n (k && (if sz = S64 then 63w else 31w)) ≠ 0 ⇒ u.AF = u'.AF) ∧
+  (1 < w2n (k && (if sz = S64 then 63w else 31w)) ⇒ u.OF = u'.OF) ⇒
+  shift_double_result u f left sz a b k = shift_double_result u' f left sz a b k
 Proof
-  rw[shift_double_result_def, LET_THM] >> ASM_REWRITE_TAC[] >>
-  first_x_assum irule >> qmatch_goalsub_abbrev_tac `1 < w2n m` >>
-  `w2n m ≠ 0` by simp[wordsTheory.w2n_eq_0] >> decide_tac
+  strip_tac >> simp[shift_double_result_def, LET_THM] >>
+  qabbrev_tac `c = w2n (k && (if sz = S64 then 63w else 31w))` >>
+  IF_CASES_TAC >- simp[] >>
+  `c ≠ 0` by gvs[Abbr `c`] >>
+  `c ≠ 1 ⇒ (u.OF ⇔ u'.OF)` by (strip_tac >> first_x_assum irule >> decide_tac) >>
+  rw[] >> gvs[]
 QED
 
 Theorem rotate_agrees:
   (1 < w2n (k && (if sz = S64 then 63w else 31w)) ⇒ u.OF = u'.OF) ⇒
-  rotate_result u f left sz a k = rotate_result u' f left sz a k
+  rotate_result u f op sz a k = rotate_result u' f op sz a k
 Proof
-  rw[rotate_result_def, LET_THM] >> qmatch_asmsub_abbrev_tac `w2n m ≠ 1` >>
-  `w2n m ≠ 0` by simp[wordsTheory.w2n_eq_0] >>
-  `u.OF = u'.OF` by (first_x_assum irule >> decide_tac) >> simp[]
+  strip_tac >> PURE_REWRITE_TAC [rotate_result_def, LET_THM] >> BETA_TAC >>
+  qabbrev_tac `c = w2n (k && (if sz = S64 then 63w else 31w))` >>
+  Cases_on `c = 0` >> ASM_REWRITE_TAC [] >>
+  `c ≠ 1 ⇒ (u.OF ⇔ u'.OF)` by (strip_tac >> first_x_assum irule >> decide_tac) >>
+  Cases_on `c = 1` >> ASM_REWRITE_TAC [] >> res_tac >> ASM_REWRITE_TAC []
 QED
 
 Theorem bit_count_agrees:
@@ -218,14 +253,14 @@ QED
 
 (* ANDN, BZHI, BLSR, BLSI and BLSMSK take AF and PF from u and clear OF. *)
 Theorem bmi_undefined_flags:
-  (bmi_flags u cf r).AF = u.AF ∧ (bmi_flags u cf r).PF = u.PF ∧ ¬(bmi_flags u cf r).OF
+  (bmi_flags u sz cf r).AF = u.AF ∧ (bmi_flags u sz cf r).PF = u.PF ∧ ¬(bmi_flags u sz cf r).OF
 Proof
   simp[bmi_flags_def]
 QED
 
 (* BLSMSK's result is never 0, so it clears ZF. *)
 Theorem blsmsk_clears_zf:
-  ¬(bmi_flags u (SND (bls_result BLSMSK a)) (FST (bls_result BLSMSK a))).ZF
+  ¬(bmi_flags u sz (SND (bls_result BLSMSK sz a)) (FST (bls_result BLSMSK sz a))).ZF
 Proof
   simp[bmi_flags_def, blsmsk_nonzero]
 QED
@@ -244,21 +279,18 @@ Definition shift_count_def:
 End
 
 Theorem adx_flag_writes:
-  execute_with ops u (Adx overflow d src) len s = Next t ⇒
+  execute_with ops u (Adx overflow sz d src) len s = Next t ⇒
   t.flags = if overflow then s.flags with OF := t.flags.OF
             else s.flags with CF := t.flags.CF
 Proof
   Cases_on `overflow` >>
-  rw[execute_with_def, pairTheory.ELIM_UNCURRY] >> simp[]
+  rw[execute_with_def, AllCaseEqs(), pairTheory.ELIM_UNCURRY] >> simp[]
 QED
 
 Theorem movbe_flags_unchanged:
-  (execute_with ops u (MovbeLoad d a) len s = Next t ∨
-   execute_with ops u (MovbeStore a src) len s = Next t) ⇒ t.flags = s.flags
+  execute_with ops u (Movbe sz d src) len s = Next t ⇒ t.flags = s.flags
 Proof
-  simp[execute_with_def, read_operand_def, write_operand_def] >>
-  rpt CASE_TAC >> simp[next_rip_def, store_def, write_reg_def, write_bytes_fields] >>
-  IF_CASES_TAC >> rw[next_rip_def, write_bytes_fields] >> simp[write_bytes_fields]
+  rw[execute_with_def, AllCaseEqs()] >> imp_res_tac write_operand_flags
 QED
 
 Theorem shuffle_shift_flags_unchanged:
@@ -299,7 +331,7 @@ Proof
   rw[execute_with_def, LET_THM] >>
   gvs[AllCaseEqs(), write_xmm_def, next_rip_def] >>
   Cases_on `dst` >>
-  gvs[write_operand_def, write_reg_def, store_def, next_rip_def] >>
+  gvs[write_operand_def, write_sized_def, write_reg_def, store_def, next_rip_def] >>
   Cases_on `access_ok ops Write (size_bytes S64) s (address_of ops s len a)` >>
   gvs[next_rip_def, write_bytes_fields]
 QED
@@ -312,7 +344,7 @@ Proof
   rw[execute_with_def, LET_THM] >>
   gvs[AllCaseEqs(), write_xmm_def, next_rip_def] >>
   Cases_on `dst` >>
-  gvs[write_operand_def, write_reg_def, store_def, next_rip_def] >>
+  gvs[write_operand_def, write_sized_def, write_reg_def, store_def, next_rip_def] >>
   Cases_on `access_ok ops Write (size_bytes S32) s (address_of ops s len a)` >>
   gvs[next_rip_def, write_bytes_fields]
 QED
@@ -328,12 +360,21 @@ QED
 
 (* Each instruction depends on u through the flags it leaves undefined
    only: AF after OR, AND, XOR and TEST; AF after a shift or double shift
-   by a nonzero masked count and OF after one by more than 1; OF after a
+   by a nonzero masked count, OF after one by more than 1, and CF after an
+   8- or 16-bit SHL or SHR by the operand width or more; OF after a
    rotate by more than 1; SF, ZF, AF
    and PF after IMUL and one-operand MUL and IMUL; every flag after DIV and
-   IDIV; OF, SF, PF and AF after TZCNT and LZCNT; AF and PF after ANDN,
-   BZHI, BLSR, BLSI and BLSMSK; AF, SF and PF after BEXTR; none after any
-   other instruction. *)
+   IDIV; OF, SF, PF and AF after TZCNT, LZCNT and the bit tests; CF, OF,
+   SF, PF and AF after BSF and BSR; AF and PF after ANDN, BZHI, BLSR, BLSI
+   and BLSMSK; AF, SF and PF after BEXTR; none after any other
+   instruction. *)
+Triviality shift_result_fst:
+  ∀u u' f sz op a k. FST (shift_result u f sz op a k) = FST (shift_result u' f sz op a k)
+Proof
+  rpt gen_tac >> PURE_REWRITE_TAC [shift_result_def, LET_THM] >> BETA_TAC >>
+  COND_CASES_TAC >> REWRITE_TAC [pairTheory.FST]
+QED
+
 Theorem execute_undefined_flags:
   (case i of
      Binop op sz d r => op = ADD ∨ op = ADC ∨ op = SUB ∨ op = SBB ∨ op = CMP ∨ u.AF = u'.AF
@@ -341,19 +382,24 @@ Theorem execute_undefined_flags:
        op = ADD ∨ op = ADC ∨ op = SUB ∨ op = SBB ∨ op = CMP ∨ u.AF = u'.AF
    | Shift op sz d cnt =>
        (shift_count ops s sz cnt ≠ 0 ⇒ u.AF = u'.AF) ∧
+       (1 < shift_count ops s sz cnt ⇒ u.OF = u'.OF) ∧
+       (op ≠ SAR ∧ 8 * size_bytes sz ≤ shift_count ops s sz cnt ⇒ u.CF = u'.CF)
+   | Imul sz r src imm => u.SF = u'.SF ∧ u.ZF = u'.ZF ∧ u.AF = u'.AF ∧ u.PF = u'.PF
+   | MulWide sg sz src => u.SF = u'.SF ∧ u.ZF = u'.ZF ∧ u.AF = u'.AF ∧ u.PF = u'.PF
+   | Div sg sz src => u = u'
+   | ShiftDouble left sz d src cnt =>
+       (shift_count ops s sz cnt ≠ 0 ⇒ u.AF = u'.AF) ∧
        (1 < shift_count ops s sz cnt ⇒ u.OF = u'.OF)
-   | Imul r src => u.SF = u'.SF ∧ u.ZF = u'.ZF ∧ u.AF = u'.AF ∧ u.PF = u'.PF
-   | MulWide sg r => u.SF = u'.SF ∧ u.ZF = u'.ZF ∧ u.AF = u'.AF ∧ u.PF = u'.PF
-   | Div sg sz r => u = u'
-   | ShiftDouble left d src =>
-       (w2n (w2w (read_reg ops s 1w) && 63w : word8) ≠ 0 ⇒ u.AF = u'.AF) ∧
-       (1 < w2n (w2w (read_reg ops s 1w) && 63w : word8) ⇒ u.OF = u'.OF)
-   | Rotate left sz r cnt => (1 < shift_count ops s sz cnt ⇒ u.OF = u'.OF)
+   | Rotate op sz d cnt => (1 < shift_count ops s sz cnt ⇒ u.OF = u'.OF)
+   | Bt op sz d r => u.OF = u'.OF ∧ u.SF = u'.SF ∧ u.PF = u'.PF ∧ u.AF = u'.AF
+   | BtImm op sz d imm => u.OF = u'.OF ∧ u.SF = u'.SF ∧ u.PF = u'.PF ∧ u.AF = u'.AF
+   | BitScan rev sz r src =>
+       u.CF = u'.CF ∧ u.OF = u'.OF ∧ u.SF = u'.SF ∧ u.PF = u'.PF ∧ u.AF = u'.AF
    | BitCount op sz d src => op ≠ POPCNT ⇒ u.OF = u'.OF ∧ u.SF = u'.SF ∧ u.PF = u'.PF ∧ u.AF = u'.AF
-   | Andn d a b => u.AF = u'.AF ∧ u.PF = u'.PF
-   | Bzhi d a n => u.AF = u'.AF ∧ u.PF = u'.PF
-   | Bls op d a => u.AF = u'.AF ∧ u.PF = u'.PF
-   | Bextr d a c => u.AF = u'.AF ∧ u.SF = u'.SF ∧ u.PF = u'.PF
+   | Andn sz d a b => u.AF = u'.AF ∧ u.PF = u'.PF
+   | Bzhi sz d a n => u.AF = u'.AF ∧ u.PF = u'.PF
+   | Bls op sz d a => u.AF = u'.AF ∧ u.PF = u'.PF
+   | Bextr sz d a c => u.AF = u'.AF ∧ u.SF = u'.SF ∧ u.PF = u'.PF
    | _ => T) ⇒
   execute_with ops u i len s = execute_with ops u' i len s
 Proof
@@ -362,7 +408,14 @@ Proof
   >~ [`BinopImm`] >- (disch_then (assume_tac o MATCH_MP binop_agrees) >> simp[execute_with_def])
   >~ [`Neg`] >- (assume_tac (Q.INST [`op` |-> `SUB`] binop_agrees) >> gvs[execute_with_def])
   >~ [`Inc`] >- (assume_tac (Q.INST [`op` |-> `ADD`] binop_agrees) >> gvs[execute_with_def])
-  >~ [`Dec64`] >- (assume_tac (Q.INST [`op` |-> `SUB`] binop_agrees) >> gvs[execute_with_def])
+  >~ [`Dec`] >- (assume_tac (Q.INST [`op` |-> `SUB`] binop_agrees) >> gvs[execute_with_def])
+  >~ [`Xadd`] >- (assume_tac (Q.INST [`op` |-> `ADD`] binop_agrees) >> gvs[execute_with_def])
+  >~ [`Cmpxchg`] >- (assume_tac (Q.INST [`op` |-> `CMP`] binop_agrees) >> gvs[execute_with_def])
+  >~ [`StringOp`]
+  >- (assume_tac (Q.INST [`op` |-> `CMP`] binop_agrees) >> gvs[execute_with_def, string_step_def])
+  >~ [`BtImm`] >- (Cases_on `u` >> Cases_on `u'` >> rw[] >> simp[execute_with_def, eflags_fn_updates])
+  >~ [`Bt`] >- (Cases_on `u` >> Cases_on `u'` >> rw[] >> simp[execute_with_def, eflags_fn_updates])
+  >~ [`BitScan`] >- (Cases_on `u` >> Cases_on `u'` >> rw[] >> simp[execute_with_def, eflags_fn_updates])
   >~ [`Imul`] >- (disch_then (assume_tac o MATCH_MP imul_agrees) >> simp[execute_with_def])
   >~ [`MulWide`] >- (disch_then (assume_tac o MATCH_MP mul_wide_agrees) >> simp[execute_with_def])
   >~ [`BitCount`] >- (disch_then (assume_tac o MATCH_MP bit_count_agrees) >> simp[execute_with_def])
@@ -371,18 +424,19 @@ Proof
   >~ [`Bls`] >- (disch_then (assume_tac o MATCH_MP bmi_flags_agrees) >> simp[execute_with_def])
   >~ [`Bextr`] >- rw[execute_with_def, bextr_flags_def]
   >~ [`Mulx`] >- (simp[execute_with_def] >> CASE_TAC >> simp[mul_wide_def])
-  >~ [`Rorx`] >- rw[execute_with_def, rotate_result_def]
-  >~ [`ShiftX`] >- rw[execute_with_def, shift_result_def]
+  >~ [`Rorx`] >- simp[execute_with_def, rotate_result_def, COND_RAND]
+  >~ [`ShiftX`]
+  >- (qspecl_then [`u`, `u'`] assume_tac shift_result_fst >> asm_simp_tac (srw_ss()) [execute_with_def])
   >~ [`ShiftDouble`]
-  >- (strip_tac >> simp[execute_with_def] >>
-      qmatch_goalsub_abbrev_tac `shift_double_result u fl lft xa xb xk` >>
-      `shift_double_result u fl lft xa xb xk = shift_double_result u' fl lft xa xb xk`
-        by (irule shift_double_agrees >> gvs[Abbr `xk`]) >>
+  >- (rw[execute_with_def] >> rpt CASE_TAC >>
+      qmatch_goalsub_abbrev_tac `shift_double_result u fl lft sz' xa xb xk` >>
+      `shift_double_result u fl lft sz' xa xb xk = shift_double_result u' fl lft sz' xa xb xk`
+        by (irule shift_double_agrees >> gvs[shift_count_def, Abbr `xk`]) >>
       simp[])
   >~ [`Rotate`]
-  >- (strip_tac >> simp[execute_with_def] >>
-      qmatch_goalsub_abbrev_tac `rotate_result u fl lft sz' xa xk` >>
-      `rotate_result u fl lft sz' xa xk = rotate_result u' fl lft sz' xa xk`
+  >- (rw[execute_with_def] >> rpt CASE_TAC >>
+      qmatch_goalsub_abbrev_tac `rotate_result u fl op' sz' xa xk` >>
+      `rotate_result u fl op' sz' xa xk = rotate_result u' fl op' sz' xa xk`
         by (irule rotate_agrees >> gvs[shift_count_def, Abbr `xk`]) >>
       simp[])
   >~ [`Shift`]
@@ -394,7 +448,8 @@ Proof
   simp[execute_with_def]
 QED
 
-(* No instruction but DIV and IDIV takes CF from u. *)
+(* No instruction but DIV, IDIV, BSF, BSR and 8- and 16-bit SHL and SHR
+   takes CF from u. *)
 Theorem binop_ignores_undefined_cf:
   binop_result (u with CF := x) = binop_result u
 Proof
@@ -402,9 +457,9 @@ Proof
 QED
 
 Theorem shift_ignores_undefined_cf:
-  shift_result (u with CF := x) = shift_result u
+  sz = S32 ∨ sz = S64 ⇒ ∀f. shift_result (u with CF := x) f sz = shift_result u f sz
 Proof
-  rw[FUN_EQ_THM, shift_result_def]
+  rw[] >> rw[FUN_EQ_THM, shift_result_def, size_bytes_def, masked_count_bound]
 QED
 
 Theorem imul_ignores_undefined_cf:
@@ -449,7 +504,8 @@ QED
 Theorem rotate_ignores_undefined_cf:
   rotate_result (u with CF := x) = rotate_result u
 Proof
-  rw[FUN_EQ_THM, rotate_result_def]
+  REWRITE_TAC[FUN_EQ_THM] >> rpt gen_tac >>
+  REWRITE_TAC[rotate_result_def, eflags_accfupds]
 QED
 
 Theorem bit_count_ignores_undefined_cf:
@@ -471,20 +527,31 @@ Proof
 QED
 
 Theorem execute_ignores_undefined_cf:
-  (∀sg sz r. i ≠ Div sg sz r) ⇒
+  (∀sg sz r. i ≠ Div sg sz r) ∧ (∀rv sz r src. i ≠ BitScan rv sz r src) ∧
+  (∀op sz d cnt. i = Shift op sz d cnt ⇒ sz = S32 ∨ sz = S64) ⇒
   execute_with ops (u with CF := x) i len s = execute_with ops u i len s
 Proof
-  Cases_on `i` >> simp[] >>
-  REWRITE_TAC[execute_with_def, binop_ignores_undefined_cf, shift_ignores_undefined_cf,
-              imul_ignores_undefined_cf, mul_wide_ignores_undefined_cf,
-              shift_double_ignores_undefined_cf, rotate_ignores_undefined_cf,
-              bit_count_ignores_undefined_cf, bmi_flags_ignores_undefined_cf,
-              bextr_flags_ignores_undefined_cf]
+  Cases_on `i` >> simp[]
+  >~ [`Shift`]
+  >- (rw[] >> simp[execute_with_def, shift_ignores_undefined_cf])
+  >~ [`ShiftX`]
+  >- (qspecl_then [`u with CF := x`, `u`] assume_tac shift_result_fst >>
+      asm_simp_tac (srw_ss()) [execute_with_def]) >>
+  REWRITE_TAC[execute_with_def, string_step_def, binop_ignores_undefined_cf,
+              imul_ignores_undefined_cf,
+              mul_wide_ignores_undefined_cf, shift_double_ignores_undefined_cf,
+              rotate_ignores_undefined_cf, bit_count_ignores_undefined_cf,
+              bmi_flags_ignores_undefined_cf, bextr_flags_ignores_undefined_cf] >>
+  simp[]
 QED
 
 Theorem step_ignores_undefined_cf:
   (∀sg sz r n. decode (read_bytes functional_storage (fetchable functional_storage 15 s s.rip)
-                         s s.rip) ≠ Decoded (Div sg sz r) n) ⇒
+                         s s.rip) ≠ Decoded (Div sg sz r) n) ∧
+  (∀rv sz r src n. decode (read_bytes functional_storage (fetchable functional_storage 15 s s.rip)
+                             s s.rip) ≠ Decoded (BitScan rv sz r src) n) ∧
+  (∀op sz d cnt n. decode (read_bytes functional_storage (fetchable functional_storage 15 s s.rip)
+                             s s.rip) = Decoded (Shift op sz d cnt) n ⇒ sz = S32 ∨ sz = S64) ⇒
   step (u with CF := x) s = step u s
 Proof
   rw[step_def, step_with_def] >> CASE_TAC >> simp[] >>

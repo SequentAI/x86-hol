@@ -5,7 +5,8 @@ The inventory is every instruction form (XED iform) reached by a sweep of
 the 64-bit encoding space: each opcode of the one-byte, 0F, 0F 38 and
 0F 3A maps, under sets of legacy prefixes and REX bytes, followed by all
 256 values of the next byte (ModRM for most opcodes) and seeded random
-bytes; and the VEX opcode space under a sample of VEX prefixes. XED
+bytes; and the VEX opcode space under a sample of VEX prefixes, bare and
+after a few legacy prefix and REX byte orders. XED
 decodes the words for a Sapphire Rapids chip, so hint encodings that
 chip defines (CLDEMOTE, RDSSP) are those instructions and not NOPs.
 
@@ -18,20 +19,25 @@ Each iform is put in a tier by its XED ISA set and instruction class:
   out  system and I/O, x87 and MMX, AVX-512, and everything newer
 
 Words with a LOCK, FS or GS segment, or 67 address-size prefix are
-reported in rows of their own and do not count towards their iform.
+reported in rows of their own and do not count towards their iform, as are
+VEX words after a REX, 66, F2 or F3 byte, which the SDM makes #UD (XED
+reads some of them, such as 40 2E C4 ..., as the VEX instruction).
 
 Up to --samples words per tier-1 iform (an eighth of that per other iform
 and per prefix row), drawn from distinct prefix, REX and ModRM.mod
 groups, are decoded by `decode` in HOL4 (`cv_eval`, through `holbuild
 run`) and disassembled by llvm-objdump, as is a random sample of words
-XED rejects. A word is in scope when XED and llvm-objdump read it with
-the same length and it is not a near branch with a 66 prefix, which Intel
-and AMD CPUs execute differently. An iform is covered when HOL4 decodes
-every in-scope sample at that length as an instruction the iform's class
-allows (the HOL_FORMS table). A word HOL4 decodes is a mismatch when
+XED rejects. A word XED reads is in scope unless it is a near branch
+with a 66 prefix, which Intel and AMD CPUs execute differently. An iform
+is covered when HOL4 decodes every in-scope sample at XED's length as an
+instruction the iform's class allows (the HOL_FORMS table). A word HOL4 decodes is a mismatch when
 either reference rejects it or reads another length, when XED reads an
 instruction class the decoded instruction does not allow, or when it is a
-66-prefixed near branch.
+66-prefixed near branch. A word XED and HOL4 read alike, at XED's length
+and as an allowed class, is instead a reference disagreement when only
+llvm-objdump rejects it or reads another length: llvm-objdump rejects some
+legacy prefix orders the SDM allows (a segment prefix after 66) and splits
+off F2 and F3 as XACQUIRE and XRELEASE.
 
 XED is fetched at a pinned commit and built into a cache directory unless
 --xed names an installed XED kit; llvm-objcopy and llvm-objdump come from
@@ -90,6 +96,8 @@ EXCLUDED = {
     "cache hint": "PREFETCHW PREFETCH_EXCLUSIVE PREFETCH_RESERVED",
 }
 EXCLUDED_CLASSES = {c: why for why, names in EXCLUDED.items() for c in names.split()}
+# Opcode digits the SDM leaves undocumented that CPUs run as SHL and TEST.
+UNDOCUMENTED_ALIASES = {("SHL", "r6"), ("TEST", "r1")}
 SEGMENT_IFORMS = {"MOV_GPRv_SEG", "MOV_MEMw_SEG", "MOV_SEG_GPR16", "MOV_SEG_MEMw",
                   "POP_DS", "POP_ES", "POP_FS", "POP_GS", "POP_SS",
                   "PUSH_CS", "PUSH_DS", "PUSH_ES", "PUSH_FS", "PUSH_GS", "PUSH_SS"}
@@ -108,6 +116,8 @@ def tier_of(iform: str, iclass: str, isa_set: str, category: str) -> tuple[str, 
     if isa_set in TIER1_ISA_SETS:
         if iform in SEGMENT_IFORMS:
             return "out", "segment register"
+        if (iclass, iform[-2:]) in UNDOCUMENTED_ALIASES:
+            return "out", "undocumented alias"
         if iclass in EXCLUDED_CLASSES:
             return "out", EXCLUDED_CLASSES[iclass]
         return "1", ""
@@ -120,7 +130,8 @@ def tier_of(iform: str, iclass: str, isa_set: str, category: str) -> tuple[str, 
 
 # ---------------------------------------------------------------------------
 # What each HOL instruction may be. A key is the constructor, followed by
-# its first argument for the constructors in KEYED.
+# its first argument for the constructors in KEYED, and for StringOp its
+# width and repeat mode too.
 
 CONDITIONS = ["O", "NO", "B", "NB", "Z", "NZ", "BE", "NBE", "S", "NS", "P", "NP",
               "L", "NL", "LE", "NLE"]
@@ -129,27 +140,38 @@ PBINOPS = ["PXOR", "PADDD", "PADDQ", "PAND", "POR", "PCMPEQB", "PMULLD", "PMINUD
            "PSUBD", "PSUBQ", "PABSD", "PHADDD", "PCMPGTQ", "PMULUDQ", "PMULDQ", "PMINSD",
            "PMAXSD", "PACKUSDW", "PACKSSDW", "PMADDWD", "PMADDUBSW", "PACKUSWB", "PSADBW",
            "PAVGB", "PAVGW", "PADDUSB", "PSUBUSB", "PHMINPOSUW"]
+BT_OPS = ["BT", "BTS", "BTR", "BTC"]
+FLAG_OPS = ["CLC", "STC", "CMC", "CLD", "STD"]
+LOOPS = ["LOOP", "LOOPE", "LOOPNE", "JRCXZ"]
+STRING_OPS = ["MOVS", "CMPS", "STOS", "LODS", "SCAS"]
 KEYED = {"Binop", "BinopImm", "Shift", "Rotate", "MulWide", "Div", "ShiftDouble", "Adx",
          "BitCount", "ShiftX", "Bls", "Pdep", "Jcc", "Cmov", "Setcc", "Pbinop", "Pcmpd",
-         "Pshufw", "Pshift", "Pshiftdq", "AesRound"}
+         "Pshufw", "Pshift", "Pshiftdq", "AesRound", "Movx", "Bt", "BtImm", "BitScan",
+         "Cmpxchg2", "FlagOp", "Loop"}
 
 HOL_FORMS: dict[str, set[str]] = {
-    "MovImm": {"MOV"}, "MovImm64": {"MOV"}, "Mov": {"MOV"},
-    "Movzx": {"MOVZX"}, "Movsxd": {"MOVSXD"}, "Movsx": {"MOVSX"}, "Cdqe": {"CDQE"},
-    "Cqo": {"CQO"}, "Lea": {"LEA"}, "Not": {"NOT"}, "Neg": {"NEG"}, "Inc": {"INC"},
-    "Dec64": {"DEC"}, "Shift SHL": {"SHL"}, "Shift SHR": {"SHR"}, "Shift SAR": {"SAR"},
-    "Rotate T": {"ROL"}, "Rotate F": {"ROR"}, "Imul": {"IMUL"},
+    "MovImm": {"MOV"}, "Mov": {"MOV"}, "Movx T": {"MOVSX", "MOVSXD"}, "Movx F": {"MOVZX"},
+    "Cbw": {"CBW", "CWDE", "CDQE"}, "Cwd": {"CWD", "CDQ", "CQO"}, "Lea": {"LEA"},
+    "Not": {"NOT"}, "Neg": {"NEG"}, "Inc": {"INC"}, "Dec": {"DEC"},
+    "Shift SHL": {"SHL"}, "Shift SHR": {"SHR"}, "Shift SAR": {"SAR"},
+    "Rotate ROL": {"ROL"}, "Rotate ROR": {"ROR"}, "Rotate RCL": {"RCL"},
+    "Rotate RCR": {"RCR"}, "Imul": {"IMUL"},
     "MulWide T": {"IMUL"}, "MulWide F": {"MUL"}, "Div T": {"IDIV"}, "Div F": {"DIV"},
     "ShiftDouble T": {"SHLD"}, "ShiftDouble F": {"SHRD"}, "Bswap": {"BSWAP"},
-    "Adx F": {"ADCX"}, "Adx T": {"ADOX"}, "MovbeLoad": {"MOVBE"}, "MovbeStore": {"MOVBE"},
+    "Adx F": {"ADCX"}, "Adx T": {"ADOX"}, "Movbe": {"MOVBE"},
     "Crc32": {"CRC32"}, "BitCount TZCNT": {"TZCNT"}, "BitCount LZCNT": {"LZCNT"},
     "BitCount POPCNT": {"POPCNT"}, "Mulx": {"MULX"}, "Rorx": {"RORX"},
     "ShiftX SHL": {"SHLX"}, "ShiftX SHR": {"SHRX"}, "ShiftX SAR": {"SARX"},
     "Andn": {"ANDN"}, "Bzhi": {"BZHI"}, "Bls BLSR": {"BLSR"}, "Bls BLSI": {"BLSI"},
     "Bls BLSMSK": {"BLSMSK"}, "Pdep PDEP": {"PDEP"}, "Pdep PEXT": {"PEXT"},
-    "Bextr": {"BEXTR"}, "Push": {"PUSH"}, "Pop": {"POP"}, "Call": {"CALL_NEAR"},
-    "Jmp": {"JMP"}, "JmpReg": {"JMP"}, "Ret": {"RET_NEAR"},
-    "Nop": {"NOP", "PAUSE", "ENDBR64"},
+    "Bextr": {"BEXTR"}, "Push": {"PUSH"}, "PushImm": {"PUSH"}, "Pop": {"POP"},
+    "Pushf": {"PUSHF", "PUSHFQ"}, "Popf": {"POPF", "POPFQ"}, "Lahf": {"LAHF"},
+    "Sahf": {"SAHF"}, "Call": {"CALL_NEAR"}, "CallInd": {"CALL_NEAR"}, "Jmp": {"JMP"},
+    "JmpInd": {"JMP"}, "Ret": {"RET_NEAR"}, "Leave": {"LEAVE"}, "Enter": {"ENTER"},
+    "Xchg": {"XCHG"}, "Xadd": {"XADD"}, "Cmpxchg": {"CMPXCHG"},
+    "Cmpxchg2 F": {"CMPXCHG8B"}, "Cmpxchg2 T": {"CMPXCHG16B"}, "BitScan F": {"BSF"},
+    "BitScan T": {"BSR"}, "Xlat": {"XLAT"},
+    "Nop": {"NOP", "PAUSE", "ENDBR64", "ENDBR32"},
     "VecLoad": {"MOVUPS", "MOVDQU", "MOVDQA"}, "VecStore": {"MOVUPS", "MOVDQU"},
     "VecMov": {"MOVDQA"}, "Pblendvb": {"PBLENDVB"}, "Pcmpd T": {"PCMPGTD"},
     "Pcmpd F": {"PCMPEQD"},
@@ -164,6 +186,10 @@ HOL_FORMS: dict[str, set[str]] = {
     "Pinsrq": {"PINSRQ"}, "Pextrq": {"PEXTRQ"}, "Punpcklqdq": {"PUNPCKLQDQ"},
     "Pmovmskb": {"PMOVMSKB"}, "Movd": {"MOVD", "MOVQ"}, "MovqXmm": {"MOVQ"},
     "Pinsrd": {"PINSRD"}, "Pextrd": {"PEXTRD"}, "MovdXmm": {"MOVD"},
+    # Constructors the decoder had before tier 1, for measuring older commits.
+    "MovImm64": {"MOV"}, "Movzx": {"MOVZX"}, "Movsx": {"MOVSX"}, "Movsxd": {"MOVSXD"},
+    "Cdqe": {"CDQE"}, "Cqo": {"CQO"}, "Dec64": {"DEC"}, "MovbeLoad": {"MOVBE"},
+    "MovbeStore": {"MOVBE"}, "JmpReg": {"JMP"}, "Rotate T": {"ROL"}, "Rotate F": {"ROR"},
 }
 for _b in BINOPS:
     HOL_FORMS[f"Binop {_b}"] = HOL_FORMS[f"BinopImm {_b}"] = {_b}
@@ -171,12 +197,25 @@ for _n, _c in enumerate(CONDITIONS):
     HOL_FORMS[f"Jcc {_n}w"] = {f"J{_c}"}
     HOL_FORMS[f"Cmov {_n}w"] = {f"CMOV{_c}"}
     HOL_FORMS[f"Setcc {_n}w"] = {f"SET{_c}"}
+for _o in BT_OPS:
+    HOL_FORMS[f"Bt {_o}"] = HOL_FORMS[f"BtImm {_o}"] = {_o}
+for _o in FLAG_OPS:
+    HOL_FORMS[f"FlagOp {_o}"] = {_o}
+for _o in LOOPS:
+    HOL_FORMS[f"Loop {_o}"] = {_o}
+for _o in STRING_OPS:
+    for _size, _w in zip(("S8", "S16", "S32", "S64"), "BWDQ"):
+        for _rep, _r in (("NoRep", ""), ("RepE", "REP_" if _o in ("MOVS", "STOS", "LODS")
+                                         else "REPE_"), ("RepNE", "REPNE_")):
+            HOL_FORMS[f"StringOp {_o} {_size} {_rep}"] = {f"{_r}{_o}{_w}"}
 for _p in PBINOPS:
     HOL_FORMS[f"Pbinop {_p}"] = {_p} | ({"XORPS"} if _p == "PXOR" else set())
 
 
 def hol_key(instruction: str) -> str:
     words = instruction.split()
+    if words[0] == "StringOp":  # the width and repeat mode name XED's class
+        return " ".join(words[:4])
     return " ".join(words[:2]) if words[0] in KEYED else words[0]
 
 
@@ -195,6 +234,11 @@ PREFIX_SETS += [[0xF0], [0x64], [0x65], [0x67]]
 REXES = [None, *range(0x40, 0x50)]
 # A word's row: the prefixes that keep it from counting towards its iform.
 ROWS = {0xF0: "LOCK", 0x64: "FS/GS segment", 0x65: "FS/GS segment", 0x67: "address size"}
+BEFORE_VEX = "REX, 66, F2 or F3 before VEX"
+# Prefix orders swept before VEX words: segment prefixes are allowed there,
+# REX, 66, F2 and F3 make the word #UD.
+VEX_PREFIXES = [[0x2E], [0x40], [0x48], [0x66], [0xF2], [0xF3], [0x40, 0x2E], [0x2E, 0x40],
+                [0x2E, 0x66]]
 
 
 def heads() -> list[bytes]:
@@ -210,12 +254,21 @@ def heads() -> list[bytes]:
                 for op in range(256):
                     if escape != b"\x0f" or op not in (0x38, 0x3A):
                         out.append(pre + escape + bytes([op]))
-    for rxb in (7, 0):
+    for prefixes in VEX_PREFIXES:
+        for pp in range(4):
+            for op in range(256):
+                for mmmmm in (2, 3):
+                    for w in (0, 1):
+                        out.append(bytes(prefixes + [0xC4, 0xE0 | mmmmm, w << 7 | 0xF << 3 | pp,
+                                                     op]))
+    for rxb in range(8):
         for vvvv in (0xF, 0x0, 0x5):
             for length in (0, 1):
                 for pp in range(4):
                     for op in range(256):
-                        out.append(bytes([0xC5, rxb >> 2 << 7 | vvvv << 3 | length << 2 | pp, op]))
+                        if rxb in (7, 0):  # C5 has only VEX.R
+                            out.append(bytes([0xC5, rxb >> 2 << 7 | vvvv << 3 | length << 2 | pp,
+                                              op]))
                         for mmmmm in (1, 2, 3):
                             for w in (0, 1):
                                 out.append(bytes([0xC4, rxb << 5 | mmmmm,
@@ -224,11 +277,14 @@ def heads() -> list[bytes]:
 
 
 def row_of(word: bytes) -> str:
-    for b in word:
-        if b not in LEGACY:
-            return ""
+    for i, b in enumerate(word):
         if b in ROWS:
             return ROWS[b]
+        if b in (0xC4, 0xC5):
+            return BEFORE_VEX if any(p in (0x66, 0xF2, 0xF3) or p & 0xF0 == 0x40
+                                     for p in word[:i]) else ""
+        if b not in LEGACY and b & 0xF0 != 0x40:
+            return ""
     return ""
 
 
@@ -493,7 +549,7 @@ def main() -> None:
         sweep(probe, rng, iforms)
         rejected = rejected_words(probe, rng, args.rejected)
 
-    rows = sorted({""} | set(ROWS.values()))
+    rows = sorted({"", BEFORE_VEX} | set(ROWS.values()))
     # HOL4 decodes about 150 words a second, so iforms outside tier 1, and
     # the prefix rows, get an eighth of the samples.
     picked = [(iform, row, word) for iform in iforms.values() for row in rows
@@ -507,6 +563,7 @@ def main() -> None:
     per_iform: dict[str, Counter] = defaultdict(Counter)
     per_row: dict[str, Counter] = defaultdict(Counter)
     mismatches = []
+    disagreements = []
     for (iform, row, word), h, l in zip(picked, hol, llvm):
         xed_length = len(word) if iform else None
         allowed = HOL_FORMS.get(hol_key(h.text), set()) if h.length else set()
@@ -519,7 +576,11 @@ def main() -> None:
                 ("class", iform is not None and iform.iclass not in allowed),
                 ("vendor-defined", iform is not None and vendor_defined(iform.iclass, word)))
                 if bad]
-            if reasons:
+            llvm_only = {"llvm-objdump rejects", "llvm-objdump length"}
+            if reasons and set(reasons) <= llvm_only:
+                disagreements.append({"word": word.hex(), "hol": h.text, "xed": iform and iform.name,
+                                      "llvm": l.text})
+            elif reasons:
                 mismatches.append({"word": word.hex(), "hol": h.text, "length": h.length,
                                    "xed": iform and iform.name, "llvm": l.text,
                                    "reasons": reasons})
@@ -531,7 +592,7 @@ def main() -> None:
             continue
         counts = per_iform[iform.name]
         counts["samples"] += 1
-        if l.length == xed_length and not vendor_defined(iform.iclass, word):
+        if not vendor_defined(iform.iclass, word):
             counts["in scope"] += 1
             counts["decoded"] += h.length == xed_length and iform.iclass in allowed
 
@@ -561,18 +622,23 @@ def main() -> None:
         for r in gaps:
             print(f"  {r['iform']} ({r['state']}, {r['decoded']}/{r['in_scope']})")
     for row in rows[1:]:
-        print(f"{row} prefix: {per_row[row]['words']} words, "
+        print(f"{row if row == BEFORE_VEX else row + ' prefix'}: {per_row[row]['words']} words, "
               f"{per_row[row]['decoded']} decoded by HOL4")
     print(f"words HOL4 decodes that the references reject or read otherwise: {len(mismatches)}")
     for m in mismatches[:20]:
         print(f"  {m['word']} {m['hol']} ({m['length']} bytes): {', '.join(m['reasons'])}; "
               f"XED {m['xed']}, llvm-objdump {m['llvm']}")
+    print(f"words XED and HOL4 read alike that llvm-objdump rejects or reads otherwise: "
+          f"{len(disagreements)}")
+    for d in disagreements[:5]:
+        print(f"  {d['word']} {d['hol']}: XED {d['xed']}, llvm-objdump {d['llvm']}")
     if args.json:
         args.json.write_text(json.dumps({"xed_commit": xed_commit,
                                          "tiers": {t: {s: c[s] for s in STATES}
                                                    for t, c in tiers.items()},
                                          "iforms": report,
-                                         "rows": per_row, "mismatches": mismatches},
+                                         "rows": per_row, "mismatches": mismatches,
+                                         "reference_disagreements": disagreements},
                                         indent=1) + "\n")
 
 
