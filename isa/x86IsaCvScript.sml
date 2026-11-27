@@ -234,7 +234,7 @@ Proof
   rw[abstract_updates, abstract_write_operand, abstract_next_rip, abstract_result_def,
      next_rip_def, abstract_reads, abstract_write_sized, abstract_push] >>
   gvs[case_abstract_result] >> rpt CASE_TAC >>
-  gvs[abstract_result_def, abstract_write_operand, abstract_next_rip]
+  gvs[abstract_result_def, abstract_write_operand, abstract_next_rip, abstract_access_ok]
 QED
 
 Definition step_cv_def:

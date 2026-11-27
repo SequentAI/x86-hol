@@ -17,7 +17,7 @@ import struct
 import subprocess
 import tempfile
 
-from cases import (CODE_BASE, DATA_BASE, DATA_SIZE, ENTRY, FLAG_MASK, M32, STACK_BASE,
+from cases import (CODE_BASE, DATA_BASE, DATA_SIZE, ENTRY, M32, OUTCOME_MASK, STACK_BASE,
                    STACK_TOP, STACK_WINDOW, ExecCase, exec_cases)
 
 PAGE = 4096
@@ -36,6 +36,41 @@ class Outcome:
     regs: tuple[int, ...] = ()
     xmm: tuple[int, ...] = ()
     flags: int = 0
+
+
+# The VEX 0F38 forms whose SDM result the unicorn backend records, by
+# opcode and VEX.pp.
+BMI_FIXED = {(0xF5, 0): "bzhi", (0xF5, 3): "pdep", (0xF7, 0): "bextr"}
+
+
+@dataclass
+class BmiFix:
+    """A BZHI, PDEP or BEXTR whose SDM result the unicorn backend records:
+    its destination register, operand bits, VEX.vvvv register value, and
+    ModRM.rm value (None until a memory operand is read)."""
+    op: str
+    dest: int
+    bits: int
+    vvvv: int
+    rm: int | None
+
+    def result(self) -> tuple[int, bool | None]:
+        """The destination value the SDM gives, and CF, or None for PDEP,
+        which leaves the flags alone."""
+        m = (1 << self.bits) - 1
+        src = (self.rm or 0) & m
+        if self.op == "pdep":
+            value, k = 0, 0
+            for i in range(self.bits):
+                if src >> i & 1:
+                    value |= (self.vvvv >> k & 1) << i
+                    k += 1
+            return value, None
+        if self.op == "bzhi":
+            n = self.vvvv & 0xFF
+            return (src & ((1 << n) - 1) if n < self.bits else src), n >= self.bits
+        start, length = self.vvvv & 0xFF, self.vvvv >> 8 & 0xFF
+        return src >> start & ((1 << length) - 1), False
 
 
 def prot(permissions: str) -> int:
@@ -141,48 +176,43 @@ def run_unicorn(cases: list[ExecCase]) -> list[Outcome]:
         aligned_read = [False]
         misaligned = []
 
-        # Unicorn's QEMU 5 core sets CF at BZHI index 63 and clears bit 63
-        # above it, and inverts BLSI's CF; the SDM sets CF only past index
-        # 63, keeps the source there (ZF and SF from it), and sets BLSI's
-        # CF on a nonzero source. It also caps BEXTR's length at 63, where
-        # the SDM keeps every bit from the start up at a length past 63. So
-        # the backend corrects all three after they run: the register to
-        # write, if any, its value, and CF.
-        fix: list[tuple[int | None, int, bool]] = []
+        # Unicorn's QEMU 5 core gets BZHI and BEXTR wrong at an index or
+        # length at or past the operand size: at BZHI index 63 it sets CF,
+        # and past the top bit it clears that bit, where the SDM sets CF only
+        # past the top bit and keeps the source there; it caps BEXTR's length
+        # below the operand size. Its 32-bit BEXTR shifts in the source
+        # register's upper half, and its 32-bit PDEP leaves the upper half
+        # set. It also gets BLSI's CF wrong, which the SDM sets on a nonzero
+        # source, that is a nonzero result. So the backend records the SDM's
+        # result of every BZHI, BEXTR (with ZF, SF, CF and OF) and PDEP, and
+        # BLSI's CF from its destination register (VEX.vvvv).
+        # Flags written from a hook don't survive QEMU's lazy flag state, so
+        # these corrections go into the outcome, and such an instruction must
+        # be the case's last.
+        bmi: list[BmiFix] = []
+        fix_blsi: list[int] = []
         # It also adds PHADDD's source pairs after writing the destination's,
         # so with one register for both, the upper two lanes come out wrong;
         # the backend writes the SDM's result instead.
         fix_xmm: list[tuple[int, int]] = []
 
         def on_instruction(uc, address, size, _) -> None:
+            if (bmi or fix_blsi) and uc.mem_read(address, 1) != b"\xcc":
+                raise SystemExit(f"{case.name}: BZHI, PDEP, BEXTR or BLSI before another instruction")
             if fix_xmm:
                 reg, value = fix_xmm.pop()
                 uc.reg_write(xmm[reg], value)
-            if fix:
-                dest, value, cf = fix.pop()
-                eflags = uc.reg_read(x86.UC_X86_REG_EFLAGS) & ~1 | cf
-                if dest is not None:
-                    uc.reg_write(order[dest], value)
-                    eflags = eflags & ~0xC0 | (value == 0) << 6 | (value >> 63) << 7
-                uc.reg_write(x86.UC_X86_REG_EFLAGS, eflags)
             before_instruction[:] = [windows()]
             b = bytes(uc.mem_read(address, size))
-            if size == 5 and b[0] == 0xC4 and b[1] & 0x1F == 2 and b[2] & 0x83 == 0x80 \
-                    and b[4] >> 6 == 3:
-                reg = (b[4] >> 3 & 7) | (~b[1] >> 4 & 8)
-                src = uc.reg_read(order[(b[4] & 7) | (~b[1] >> 2 & 8)])
-                vvvv = ~b[2] >> 3 & 15
-                if b[3] == 0xF5:
-                    index = uc.reg_read(order[vvvv]) & 0xFF
-                    if index >= 63:
-                        fix.append((reg if index > 63 else None, src, index > 63))
-                elif b[3] == 0xF3 and reg == 3:
-                    fix.append((None, 0, src != 0))
-                elif b[3] == 0xF7:
-                    control = uc.reg_read(order[vvvv])
-                    start = control & 0xFF
-                    if control >> 8 & 0xFF > 63 and start < 64:
-                        fix.append((reg, src >> start, False))
+            if size >= 5 and b[0] == 0xC4 and b[1] & 0x1F == 2 and b[2] & 0x03 == 0 \
+                    and b[3] == 0xF3 and b[4] >> 3 & 7 == 3:
+                fix_blsi.append(~b[2] >> 3 & 15)
+            if size >= 5 and b[0] == 0xC4 and b[1] & 0x1F == 2 and b[2] & 0x04 == 0 \
+                    and (b[3], b[2] & 3) in BMI_FIXED:
+                rm = uc.reg_read(order[(b[4] & 7) | (~b[1] >> 2 & 8)]) if b[4] >> 6 == 3 else None
+                bmi.append(BmiFix(BMI_FIXED[b[3], b[2] & 3], (b[4] >> 3 & 7) | (~b[1] >> 4 & 8),
+                                  64 if b[2] & 0x80 else 32,
+                                  uc.reg_read(order[~b[2] >> 3 & 15]), rm))
             rest = b[2:] if len(b) > 1 and 0x40 <= b[1] <= 0x4F else b[1:]
             if b[:1] == b"\x66" and rest[:3] == b"\x0f\x38\x02" and len(rest) == 4 \
                     and rest[3] >> 6 == 3:
@@ -198,7 +228,10 @@ def run_unicorn(cases: list[ExecCase]) -> list[Outcome]:
                 or (rest[:2] == b"\x0f\x38" and len(rest) >= 4 and 0xDC <= rest[2] <= 0xDF))
 
         def on_read(uc, access, address, size, value, _) -> bool:
-            """Check the address on the first half of the 16-byte read."""
+            """Record a BZHI, PDEP or BEXTR memory operand; check the address on the
+            first half of the 16-byte read."""
+            if access == unicorn.UC_MEM_READ and bmi and bmi[-1].rm is None:
+                bmi[-1].rm = int.from_bytes(uc.mem_read(address, size), "little")
             if aligned_read[0] and address % 16:
                 misaligned.append(address)
                 uc.emu_stop()
@@ -229,10 +262,17 @@ def run_unicorn(cases: list[ExecCase]) -> list[Outcome]:
             continue
         if trapped != [3]:
             raise SystemExit(f"{case.name}: stopped without reaching int3 ({trapped})")
+        regs = [uc.reg_read(r) for r in order]
+        flags = uc.reg_read(x86.UC_X86_REG_EFLAGS) & OUTCOME_MASK
+        for f in bmi:
+            value, cf = f.result()
+            regs[f.dest] = value
+            if cf is not None:
+                flags = flags & ~0x8C1 | cf | (value == 0) << 6 | (value >> f.bits - 1 & 1) << 7
+        for dest in fix_blsi:
+            flags = flags & ~1 | (regs[dest] != 0)
         outcomes.append(Outcome(None, *windows(), uc.reg_read(x86.UC_X86_REG_RIP) - 1,
-                                tuple(uc.reg_read(r) for r in order),
-                                tuple(uc.reg_read(r) for r in xmm),
-                                uc.reg_read(x86.UC_X86_REG_EFLAGS) & FLAG_MASK))
+                                tuple(regs), tuple(uc.reg_read(r) for r in xmm), flags))
     return outcomes
 
 
@@ -253,7 +293,7 @@ def render(cases: list[ExecCase], outcomes: list[Outcome]) -> str:
              "                     word64 # perm # perm``",
              "",
              "(* The int3 reached, with RAX..R15, XMM0..XMM15 and the flags there (CF PF",
-             "   AF ZF SF OF bits, those outside the mask cleared), and the mask of flags",
+             "   AF ZF SF DF OF bits, those outside the mask cleared), and the mask of flags",
              "   compared: all but the undefined ones. Or the fault raised. *)",
              "Datatype:",
              "  outcome = Reached word64 (word64 list) (word128 list) word64 word64",
@@ -268,7 +308,7 @@ def render(cases: list[ExecCase], outcomes: list[Outcome]) -> str:
         if outcome.fault:
             result = "Faulted " + FAULTS[outcome.fault]
         else:
-            mask = FLAG_MASK & ~case.undefined
+            mask = OUTCOME_MASK & ~case.undefined
             result = (f"Reached 0x{outcome.rip:x}w\n       {words(outcome.regs, 16)}\n"
                       f"       {words(outcome.xmm)}\n"
                       f"       0x{outcome.flags & mask:x}w 0x{mask:x}w")

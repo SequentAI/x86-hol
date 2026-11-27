@@ -2531,10 +2531,20 @@ Definition execute_with_def:
          case read_operand ops sz s len src of
            NONE => Fault Load
          | SOME b =>
-             let (v, f) = binop_result u F sz ADD a b in
-               case write_operand ops sz (s with flags := f) len src a of
-                 Next t => next_rip len (write_operand ops sz t len d v)
-               | Fault e => Fault e) ∧
+             let (v, f) = binop_result u F sz ADD a b; s' = s with flags := f in
+               (* A memory destination is stored first, at the address its
+                  registers give before the source register changes; a
+                  register destination is written last, so that XADD r, r
+                  leaves the sum. *)
+               case d of
+                 RmMem _ =>
+                   (case write_operand ops sz s' len d v of
+                      Next t => next_rip len (write_operand ops sz t len src a)
+                    | Fault e => Fault e)
+               | _ =>
+                   (case write_operand ops sz s' len src a of
+                      Next t => next_rip len (write_operand ops sz t len d v)
+                    | Fault e => Fault e)) ∧
   execute_with ops u (Cmpxchg sz d src) len s =
     (case read_operand ops sz s len d of
        NONE => Fault Load
@@ -2742,8 +2752,12 @@ Definition execute_with_def:
                         | Fault f => Fault f) of
                Fault f => Fault f
              | Next t' =>
-                 Next (write_reg ops 4w (read_reg ops t' 4w - w2w alloc) (write_sized ops sz 5w frame t')
-                       with rip := s.rip + n2w len)) ∧
+                 let sp = read_reg ops t' 4w - w2w alloc in
+                   (* ENTER faults if a write at the final stack pointer would. *)
+                   if access_ok ops Write (size_bytes sz) t' sp then
+                     Next (write_reg ops 4w sp (write_sized ops sz 5w frame t')
+                           with rip := s.rip + n2w len)
+                   else Fault Store) ∧
   execute_with ops u (Call d) len s =
     (let ret = s.rip + n2w len in
        case push ops S64 ret s of

@@ -24,11 +24,10 @@ Up to --samples words per tier-1 iform (an eighth of that per other iform
 and per prefix row), drawn from distinct prefix, REX and ModRM.mod
 groups, are decoded by `decode` in HOL4 (`cv_eval`, through `holbuild
 run`) and disassembled by llvm-objdump, as is a random sample of words
-XED rejects. A word is in scope when XED and llvm-objdump read it with
-the same length and it is not a near branch with a 66 prefix, which Intel
-and AMD CPUs execute differently. An iform is covered when HOL4 decodes
-every in-scope sample at that length as an instruction the iform's class
-allows (the HOL_FORMS table). A word HOL4 decodes is a mismatch when
+XED rejects. A word XED reads is in scope unless it is a near branch
+with a 66 prefix, which Intel and AMD CPUs execute differently. An iform
+is covered when HOL4 decodes every in-scope sample at XED's length as an
+instruction the iform's class allows (the HOL_FORMS table). A word HOL4 decodes is a mismatch when
 either reference rejects it or reads another length, when XED reads an
 instruction class the decoded instruction does not allow, or when it is a
 66-prefixed near branch. A word XED and HOL4 read alike, at XED's length
@@ -94,6 +93,8 @@ EXCLUDED = {
     "cache hint": "PREFETCHW PREFETCH_EXCLUSIVE PREFETCH_RESERVED",
 }
 EXCLUDED_CLASSES = {c: why for why, names in EXCLUDED.items() for c in names.split()}
+# Opcode digits the SDM leaves undocumented that CPUs run as SHL and TEST.
+UNDOCUMENTED_ALIASES = {("SHL", "r6"), ("TEST", "r1")}
 SEGMENT_IFORMS = {"MOV_GPRv_SEG", "MOV_MEMw_SEG", "MOV_SEG_GPR16", "MOV_SEG_MEMw",
                   "POP_DS", "POP_ES", "POP_FS", "POP_GS", "POP_SS",
                   "PUSH_CS", "PUSH_DS", "PUSH_ES", "PUSH_FS", "PUSH_GS", "PUSH_SS"}
@@ -112,6 +113,8 @@ def tier_of(iform: str, iclass: str, isa_set: str, category: str) -> tuple[str, 
     if isa_set in TIER1_ISA_SETS:
         if iform in SEGMENT_IFORMS:
             return "out", "segment register"
+        if (iclass, iform[-2:]) in UNDOCUMENTED_ALIASES:
+            return "out", "undocumented alias"
         if iclass in EXCLUDED_CLASSES:
             return "out", EXCLUDED_CLASSES[iclass]
         return "1", ""
@@ -560,7 +563,7 @@ def main() -> None:
             continue
         counts = per_iform[iform.name]
         counts["samples"] += 1
-        if l.length == xed_length and not vendor_defined(iform.iclass, word):
+        if not vendor_defined(iform.iclass, word):
             counts["in scope"] += 1
             counts["decoded"] += h.length == xed_length and iform.iclass in allowed
 

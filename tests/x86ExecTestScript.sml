@@ -16,13 +16,6 @@ Definition flags_of_word_def:
        ZF := word_bit 6 w; SF := word_bit 7 w; OF := word_bit 11 w |>
 End
 
-Definition word_of_flags_def:
-  word_of_flags f : word64 =
-    (if f.CF then 0x1w else 0w) || (if f.PF then 0x4w else 0w) ||
-    (if f.AF then 0x10w else 0w) || (if f.ZF then 0x40w else 0w) ||
-    (if f.SF then 0x80w else 0w) || (if f.OF then 0x800w else 0w)
-End
-
 Definition put_many_def:
   put_many (address:num) [] tree = tree ∧
   put_many address (value::values) tree =
@@ -106,7 +99,7 @@ Definition agrees_def:
       Reached rip regs xmm flags mask =>
         (case run_to rip fuel (flags_of_word flags) (test_state code input) of
            (NONE, t) => read_regs 16 0 t.regs = regs ∧ read_xmms 16 0 t.xmm = xmm ∧
-                        word_of_flags t.flags && mask = flags ∧
+                        flags_word t.flags t.df && mask = flags ∧
                         windows_agree data stack t
          | (SOME _, _) => F)
     | Faulted k =>
@@ -117,6 +110,7 @@ End
 
 val () = cv_auto_trans agrees_def;
 
+(* The case's name if the model disagrees with it. *)
 fun check i =
   let
     val name = "exec_case_" ^ Int.toString i
@@ -124,12 +118,16 @@ fun check i =
     val result = cv_eval (mk_comb (``agrees``, rhs (concl def)))
   in
     if aconv (rhs (concl result)) T then
-      ignore (save_thm (name ^ "_agrees", EQT_ELIM (PURE_REWRITE_RULE [GSYM def] result)))
-    else raise Fail (name ^ ": the model disagrees with the observed outcome")
+      (save_thm (name ^ "_agrees", EQT_ELIM (PURE_REWRITE_RULE [GSYM def] result)); NONE)
+    else SOME name
   end;
 
 val count = numSyntax.int_of_term (rhs (concl exec_case_count_def));
-val () = List.app check (List.tabulate (count, I));
+val () =
+  case List.mapPartial check (List.tabulate (count, I)) of
+    [] => ()
+  | names => raise Fail ("the model disagrees with the observed outcome of " ^
+                         String.concatWith ", " names)
 
 (* Fail-closed cases hardware can't show with the harness's fixed pages. *)
 Definition place_def:
@@ -250,3 +248,10 @@ val () = check_fault "store_rejects_unreadable_memory"
 val () = check_fault "store128_rejects_executable_last_byte"
   ``set_perm 0x20000F (perm T T T)
       (place 0x100100 [0x0Fw; 0x11w; 0x05w; 0xF9w; 0xFEw; 0x0Fw; 0x00w] ^start)`` ``Store``;
+(* enter $0x10, $0 with RSP 0x300008: pushing RBP to 0x300000 succeeds, but
+   the final RSP 0x2FFFF0 is unmapped, and ENTER faults if a write there
+   would (QEMU doesn't check, so no generated case shows this). *)
+val () = check_fault "enter_rejects_unwritable_final_rsp"
+  ``test_state [0xC8w; 0x10w; 0x00w; 0x00w]
+      (0x100100w, 0w::0w::0w::0w::0x300008w::REPLICATE 11 0w, REPLICATE 16 0w, 0w, [], 0w,
+       perm T T F, perm T T F)`` ``Store``;

@@ -22,6 +22,8 @@ DATA_SIZE = 256
 STACK_WINDOW = 128  # bytes below STACK_END the harnesses report
 FLAG_BITS = (0, 2, 4, 6, 7, 11)  # CF PF AF ZF SF OF
 FLAG_MASK = sum(1 << b for b in FLAG_BITS)
+# Outcomes compare DF too; cases start with DF clear.
+OUTCOME_MASK = FLAG_MASK | 1 << 10
 MASK64 = (1 << 64) - 1
 
 REG64 = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"] + [f"r{i}" for i in range(8, 16)]
@@ -2661,6 +2663,10 @@ class CaseBuilder:
                          prefix + rex(w, 0, 0, reg) + bytes([0x90 + (reg & 7)]))
         self.add("xchgb r8, m8", mem_op(b"\x86", 0, 5, Address(RDI)), self.at_data(),
                  data=self.data())
+        # The source register is the address register: the sum is stored
+        # through the old address before the register takes the old value.
+        self.add("xaddq %rdi, (%rdi)", mem_op(b"\x0f\xc1", 1, RDI, Address(RDI)),
+                 self.at_data(), data=self.data())
         for prefix, w, size, bits, opcode in [(b"", 0, "b", 8, 0xB0), (b"\x66", 0, "w", 16, 0xB1),
                                               (b"", 0, "l", 32, 0xB1), (b"", 1, "q", 64, 0xB1)]:
             for equal in (True, False):
@@ -2777,8 +2783,10 @@ class CaseBuilder:
                 d, s = self.operand(), self.operand()
                 self.add(f"{mnemonic} r, r, flags {flags:#x}",
                          prefix + reg_op(b"\x0f\x38\xf6", 0, d, s), flags=flags)
-            self.add(f"{mnemonic} m, r", prefix + mem_op(b"\x0f\x38\xf6", 0, RAX, Address(RDI)),
-                     self.at_data(), data=self.data())
+            for w, size in [(0, "l"), (1, "q")]:
+                self.add(f"{mnemonic[:4]}{size} m, r",
+                         prefix + mem_op(b"\x0f\x38\xf6", w, RAX, Address(RDI)),
+                         self.at_data(), data=self.data())
         for w in (0, 1):
             size = "q" if w else "l"
             d, a, b = self.operand(), self.operand(), self.operand()
@@ -2794,9 +2802,7 @@ class CaseBuilder:
                     ("shrx", 2, 3, 0xF7, d, a, 0),
                     ("blsr", 2, 0, 0xF3, 1, d, AF | PF),
                     ("blsmsk", 2, 0, 0xF3, 2, d, AF | PF),
-                    # QEMU clears CF here where the SDM sets it for a nonzero
-                    # source; the blsiq register cases check CF.
-                    ("blsi", 2, 0, 0xF3, 3, d, AF | PF | CF)]:
+                    ("blsi", 2, 0, 0xF3, 3, d, AF | PF)]:
                 if w == 0:
                     self.add(f"{name}{size} r", vex_reg(mmmmm, pp, w, opcode, reg, v, b),
                              undefined=undefined)
@@ -2918,7 +2924,7 @@ class CaseBuilder:
                         else:
                             self.add(f"{label} rcx={count}", code, regs, data=bytes(data))
         regs = self.regs()
-        regs[RSI], regs[RDI], regs[RCX] = DATA_BASE, DATA_BASE + 128, 5
+        regs[RSI], regs[RDI], regs[RCX] = DATA_BASE, DATA_BASE + 16, 5
         self.add("rep movsq overlapping forwards", b"\xf3\x48\xa5", regs, data=self.data())
 
     def prefix_cases(self) -> None:
