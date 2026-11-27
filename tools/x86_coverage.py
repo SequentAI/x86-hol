@@ -93,8 +93,10 @@ SEGMENT_IFORMS = {"MOV_GPRv_SEG", "MOV_MEMw_SEG", "MOV_SEG_GPR16", "MOV_SEG_MEMw
                   "PUSH_CS", "PUSH_DS", "PUSH_ES", "PUSH_FS", "PUSH_GS", "PUSH_SS"}
 
 
-def tier_of(iform: str, iclass: str, isa_set: str) -> tuple[str, str]:
+def tier_of(iform: str, iclass: str, isa_set: str, category: str) -> tuple[str, str]:
     """The tier of an iform, and why it is outside tier 1 if a tier-1 set has it."""
+    if category == "MMX":
+        return "out", "MMX"
     if iclass in CLASS_TIERS:
         return CLASS_TIERS[iclass], ""
     if iclass.endswith("_LOCK"):
@@ -125,7 +127,7 @@ PBINOPS = ["PXOR", "PADDD", "PADDQ", "PAND", "POR", "PCMPEQB", "PMULLD", "PMINUD
            "PAVGB", "PAVGW", "PADDUSB", "PSUBUSB", "PHMINPOSUW"]
 KEYED = {"Binop", "BinopImm", "Shift", "Rotate", "MulWide", "Div", "ShiftDouble", "Adx",
          "BitCount", "ShiftX", "Bls", "Pdep", "Jcc", "Cmov", "Setcc", "Pbinop", "Pcmpd",
-         "Pshufw", "Pshift", "Pshiftdq"}
+         "Pshufw", "Pshift", "Pshiftdq", "AesRound"}
 
 HOL_FORMS: dict[str, set[str]] = {
     "MovImm": {"MOV"}, "MovImm64": {"MOV"}, "Mov": {"MOV"},
@@ -152,7 +154,8 @@ HOL_FORMS: dict[str, set[str]] = {
     "Pshufw F": {"PSHUFLW"}, "Pshufb": {"PSHUFB"}, "Pshift T": {"PSLLD", "PSLLQ"},
     "Pshift F": {"PSRLD", "PSRLQ"}, "Psrad": {"PSRAD"}, "Pshiftdq T": {"PSLLDQ"},
     "Pshiftdq F": {"PSRLDQ"}, "PxorMem": {"PXOR"},
-    "AesRound": {"AESENC", "AESENCLAST", "AESDEC", "AESDECLAST"}, "AesImc": {"AESIMC"},
+    "AesRound AESENC": {"AESENC"}, "AesRound AESENCLAST": {"AESENCLAST"},
+    "AesRound AESDEC": {"AESDEC"}, "AesRound AESDECLAST": {"AESDECLAST"}, "AesImc": {"AESIMC"},
     "Pclmul": {"PCLMULQDQ"}, "AesKeygen": {"AESKEYGENASSIST"}, "Palignr": {"PALIGNR"},
     "Pinsrq": {"PINSRQ"}, "Pextrq": {"PEXTRQ"}, "Punpcklqdq": {"PUNPCKLQDQ"},
     "Pmovmskb": {"PMOVMSKB"}, "Movd": {"MOVD", "MOVQ"}, "MovqXmm": {"MOVQ"},
@@ -300,8 +303,9 @@ def sweep(probe: Path, rng: random.Random, iforms: dict[str, Iform]) -> None:
                     continue  # the same word as with byte 00
                 word = (head + bytes([int(byte, 16)]) + tails[int(index)])[:int(length)]
                 iform = iforms[name]
-                iform.words += 1
-                group = (row_of(word), head[:-1], int(byte, 16) >> 6)
+                row = row_of(word)
+                iform.words += not row
+                group = (row, head[:-1], int(byte, 16) >> 6)
                 n = iform.seen[group]
                 iform.seen[group] += 1
                 kept = iform.groups.setdefault(group, [])
@@ -462,6 +466,7 @@ def main() -> None:
     if args.xed:
         kit = args.xed
     else:
+        args.cache = args.cache.resolve()
         args.cache.mkdir(parents=True, exist_ok=True)
         kit = xed_kit(args.cache)
     rng = random.Random(1)
@@ -470,8 +475,8 @@ def main() -> None:
         iforms = {}
         for line in subprocess.run([str(probe), "iforms"], capture_output=True, text=True,
                                    check=True).stdout.splitlines():
-            name, iclass, isa_set = line.split()
-            iforms[name] = Iform(name, iclass, isa_set, *tier_of(name, iclass, isa_set))
+            name, iclass, isa_set, category = line.split()
+            iforms[name] = Iform(name, iclass, isa_set, *tier_of(name, iclass, isa_set, category))
         sweep(probe, rng, iforms)
         rejected = rejected_words(probe, rng, args.rejected)
 
@@ -532,9 +537,10 @@ def main() -> None:
     xed = f"XED @ {xed_commit[:12]}" if xed_commit else f"XED from {args.xed} (unpinned)"
     print(f"{xed}: {reached} of {len(iforms)} iforms reached, "
           f"{len(words)} words decoded by HOL4 and llvm-objdump")
+    tiers = {tier: Counter(r["state"] for r in report if r["tier"] == tier)
+             for tier in ("1", "2", "3", "out")}
     print(f"{'tier':6} {'iforms':>7}" + "".join(f" {s:>9}" for s in STATES))
-    for tier in ("1", "2", "3", "out"):
-        t = Counter(r["state"] for r in report if r["tier"] == tier)
+    for tier, t in tiers.items():
         print(f"{tier:6} {sum(t.values()):7}" + "".join(f" {t[s]:9}" for s in STATES))
     gaps = [r for r in report if r["tier"] == "1" and r["state"] not in ("covered", "unreached")]
     if gaps:
@@ -549,7 +555,10 @@ def main() -> None:
         print(f"  {m['word']} {m['hol']} ({m['length']} bytes): {', '.join(m['reasons'])}; "
               f"XED {m['xed']}, llvm-objdump {m['llvm']}")
     if args.json:
-        args.json.write_text(json.dumps({"xed_commit": xed_commit, "iforms": report,
+        args.json.write_text(json.dumps({"xed_commit": xed_commit,
+                                         "tiers": {t: {s: c[s] for s in STATES}
+                                                   for t, c in tiers.items()},
+                                         "iforms": report,
                                          "rows": per_row, "mismatches": mismatches},
                                         indent=1) + "\n")
 
