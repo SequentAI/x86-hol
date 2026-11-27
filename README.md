@@ -48,8 +48,10 @@ independently of the test cases. It sweeps the 64-bit encoding space,
 groups the words XED accepts by instruction form (iform), decodes a
 sample of each form in HOL4 and with `llvm-objdump`, and reports, per
 tier of the instruction set, the forms the model covers and any word it
-accepts that XED or `llvm-objdump` rejects or reads differently. It
-fetches and builds XED at a pinned commit on first use.
+accepts that XED or `llvm-objdump` rejects or reads differently. Words
+that XED and the model read alike but `llvm-objdump` alone rejects, such
+as some valid legacy prefix orders, are listed apart as reference
+disagreements. It fetches and builds XED at a pinned commit on first use.
 
 ```sh
 python3 tools/x86_coverage.py --json coverage.json

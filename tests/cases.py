@@ -307,6 +307,10 @@ REJECTED = {name: bytes.fromhex(h) for name, h in [
     ("mov to a segment register", "8ed8"),
     ("far jmp through memory", "ff28"),
     ("fld1 (x87)", "d9e8"),
+    ("prefetchnta (0F 18 /0)", "0f1800"),
+    ("prefetchw (0F 0D /1)", "0f0d08"),
+    ("cldemote (0F 1C /0)", "0f1c00"),
+    ("rdsspq (F3 REX.W 0F 1E /1)", "f3480f1ec8"),
     ("REX before a legacy prefix", "48660f1f00"),
     ("16-byte nop over the 15-byte limit", "66" * 7 + "2e0f1f840000000000"),
     ("movups xmm, xmm (0F 10, register source)", "0f10c1"),
@@ -463,14 +467,12 @@ REJECTED = {name: bytes.fromhex(h) for name, h in [
     ("andn with an F3 prefix", "f3c4e2f0f2c0"),
     ("andn with a REX prefix", "40c4e2f0f2c0"),
     ("vzeroupper (C5)", "c5f877"),
-    ("blsr with VEX.R set", "c462f0f3c8"),
 ]}
 
 # Rejected encodings, each with the length of the window ending at the byte
 # that already rules it out: the model must reject that window rather than
 # find it truncated.
-REJECTED_EARLY = {"blsr with VEX.R set": 4,
-                  "psrad with REX.R (66 REX.R 0F 72 /4)": 4,
+REJECTED_EARLY = {"psrad with REX.R (66 REX.R 0F 72 /4)": 4,
                   "pslldq with REX.W": 4, "pclmulqdq with REX.W": 5,
                   "pclmulqdq xmm, m128 (memory source)": 5,
                   "palignr xmm, m128 (memory source)": 5, "palignr with REX.W": 5,
@@ -2936,8 +2938,13 @@ class CaseBuilder:
         self.add("jmpq *%rax with REX.R", b"\x44\xff\xe0",
                  [CODE_BASE + 0x40 if i == RAX else v for i, v in enumerate(self.regs())])
         for nop in ["f390", "0f1fc0", "0f1f08", "0f1f0500000000", "0f1f042500000000", "66f20f1f00",
-                    "f30f1efa", "4890"]:
+                    "f30f1efa", "4890", "f30f1efb", "0f1820", "0f1838"]:
             self.add(f"nop {nop}", bytes.fromhex(nop))
+        # VEX.R is ignored where ModRM.reg is an opcode extension, and so is
+        # ModRM.reg in SETcc. (ADOX with a 66 prefix too is ADOX, but QEMU
+        # runs it as ADCX, so it has no case here.)
+        self.add("blsr with VEX.R set", bytes.fromhex("c462f0f3c8"))
+        self.add("setb with ModRM.reg 3", bytes.fromhex("0f92d8"))
 
 
 def exec_cases() -> list[ExecCase]:

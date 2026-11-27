@@ -31,7 +31,11 @@ every in-scope sample at that length as an instruction the iform's class
 allows (the HOL_FORMS table). A word HOL4 decodes is a mismatch when
 either reference rejects it or reads another length, when XED reads an
 instruction class the decoded instruction does not allow, or when it is a
-66-prefixed near branch.
+66-prefixed near branch. A word XED and HOL4 read alike, at XED's length
+and as an allowed class, is instead a reference disagreement when only
+llvm-objdump rejects it or reads another length: llvm-objdump rejects some
+legacy prefix orders the SDM allows (a segment prefix after 66) and splits
+off F2 and F3 as XACQUIRE and XRELEASE.
 
 XED is fetched at a pinned commit and built into a cache directory unless
 --xed names an installed XED kit; llvm-objcopy and llvm-objdump come from
@@ -125,27 +129,38 @@ PBINOPS = ["PXOR", "PADDD", "PADDQ", "PAND", "POR", "PCMPEQB", "PMULLD", "PMINUD
            "PSUBD", "PSUBQ", "PABSD", "PHADDD", "PCMPGTQ", "PMULUDQ", "PMULDQ", "PMINSD",
            "PMAXSD", "PACKUSDW", "PACKSSDW", "PMADDWD", "PMADDUBSW", "PACKUSWB", "PSADBW",
            "PAVGB", "PAVGW", "PADDUSB", "PSUBUSB", "PHMINPOSUW"]
+BT_OPS = ["BT", "BTS", "BTR", "BTC"]
+FLAG_OPS = ["CLC", "STC", "CMC", "CLD", "STD"]
+LOOPS = ["LOOP", "LOOPE", "LOOPNE", "JRCXZ"]
+STRING_OPS = ["MOVS", "CMPS", "STOS", "LODS", "SCAS"]
 KEYED = {"Binop", "BinopImm", "Shift", "Rotate", "MulWide", "Div", "ShiftDouble", "Adx",
          "BitCount", "ShiftX", "Bls", "Pdep", "Jcc", "Cmov", "Setcc", "Pbinop", "Pcmpd",
-         "Pshufw", "Pshift", "Pshiftdq", "AesRound"}
+         "Pshufw", "Pshift", "Pshiftdq", "AesRound", "Movx", "Bt", "BtImm", "BitScan",
+         "Cmpxchg2", "FlagOp", "Loop", "StringOp"}
 
 HOL_FORMS: dict[str, set[str]] = {
-    "MovImm": {"MOV"}, "MovImm64": {"MOV"}, "Mov": {"MOV"},
-    "Movzx": {"MOVZX"}, "Movsxd": {"MOVSXD"}, "Movsx": {"MOVSX"}, "Cdqe": {"CDQE"},
-    "Cqo": {"CQO"}, "Lea": {"LEA"}, "Not": {"NOT"}, "Neg": {"NEG"}, "Inc": {"INC"},
-    "Dec64": {"DEC"}, "Shift SHL": {"SHL"}, "Shift SHR": {"SHR"}, "Shift SAR": {"SAR"},
-    "Rotate T": {"ROL"}, "Rotate F": {"ROR"}, "Imul": {"IMUL"},
+    "MovImm": {"MOV"}, "Mov": {"MOV"}, "Movx T": {"MOVSX", "MOVSXD"}, "Movx F": {"MOVZX"},
+    "Cbw": {"CBW", "CWDE", "CDQE"}, "Cwd": {"CWD", "CDQ", "CQO"}, "Lea": {"LEA"},
+    "Not": {"NOT"}, "Neg": {"NEG"}, "Inc": {"INC"}, "Dec": {"DEC"},
+    "Shift SHL": {"SHL"}, "Shift SHR": {"SHR"}, "Shift SAR": {"SAR"},
+    "Rotate ROL": {"ROL"}, "Rotate ROR": {"ROR"}, "Rotate RCL": {"RCL"},
+    "Rotate RCR": {"RCR"}, "Imul": {"IMUL"},
     "MulWide T": {"IMUL"}, "MulWide F": {"MUL"}, "Div T": {"IDIV"}, "Div F": {"DIV"},
     "ShiftDouble T": {"SHLD"}, "ShiftDouble F": {"SHRD"}, "Bswap": {"BSWAP"},
-    "Adx F": {"ADCX"}, "Adx T": {"ADOX"}, "MovbeLoad": {"MOVBE"}, "MovbeStore": {"MOVBE"},
+    "Adx F": {"ADCX"}, "Adx T": {"ADOX"}, "Movbe": {"MOVBE"},
     "Crc32": {"CRC32"}, "BitCount TZCNT": {"TZCNT"}, "BitCount LZCNT": {"LZCNT"},
     "BitCount POPCNT": {"POPCNT"}, "Mulx": {"MULX"}, "Rorx": {"RORX"},
     "ShiftX SHL": {"SHLX"}, "ShiftX SHR": {"SHRX"}, "ShiftX SAR": {"SARX"},
     "Andn": {"ANDN"}, "Bzhi": {"BZHI"}, "Bls BLSR": {"BLSR"}, "Bls BLSI": {"BLSI"},
     "Bls BLSMSK": {"BLSMSK"}, "Pdep PDEP": {"PDEP"}, "Pdep PEXT": {"PEXT"},
-    "Bextr": {"BEXTR"}, "Push": {"PUSH"}, "Pop": {"POP"}, "Call": {"CALL_NEAR"},
-    "Jmp": {"JMP"}, "JmpReg": {"JMP"}, "Ret": {"RET_NEAR"},
-    "Nop": {"NOP", "PAUSE", "ENDBR64"},
+    "Bextr": {"BEXTR"}, "Push": {"PUSH"}, "PushImm": {"PUSH"}, "Pop": {"POP"},
+    "Pushf": {"PUSHF", "PUSHFQ"}, "Popf": {"POPF", "POPFQ"}, "Lahf": {"LAHF"},
+    "Sahf": {"SAHF"}, "Call": {"CALL_NEAR"}, "CallInd": {"CALL_NEAR"}, "Jmp": {"JMP"},
+    "JmpInd": {"JMP"}, "Ret": {"RET_NEAR"}, "Leave": {"LEAVE"}, "Enter": {"ENTER"},
+    "Xchg": {"XCHG"}, "Xadd": {"XADD"}, "Cmpxchg": {"CMPXCHG"},
+    "Cmpxchg2 F": {"CMPXCHG8B"}, "Cmpxchg2 T": {"CMPXCHG16B"}, "BitScan F": {"BSF"},
+    "BitScan T": {"BSR"}, "Xlat": {"XLAT"},
+    "Nop": {"NOP", "PAUSE", "ENDBR64", "ENDBR32"},
     "VecLoad": {"MOVUPS", "MOVDQU", "MOVDQA"}, "VecStore": {"MOVUPS", "MOVDQU"},
     "VecMov": {"MOVDQA"}, "Pblendvb": {"PBLENDVB"}, "Pcmpd T": {"PCMPGTD"},
     "Pcmpd F": {"PCMPEQD"},
@@ -167,6 +182,15 @@ for _n, _c in enumerate(CONDITIONS):
     HOL_FORMS[f"Jcc {_n}w"] = {f"J{_c}"}
     HOL_FORMS[f"Cmov {_n}w"] = {f"CMOV{_c}"}
     HOL_FORMS[f"Setcc {_n}w"] = {f"SET{_c}"}
+for _o in BT_OPS:
+    HOL_FORMS[f"Bt {_o}"] = HOL_FORMS[f"BtImm {_o}"] = {_o}
+for _o in FLAG_OPS:
+    HOL_FORMS[f"FlagOp {_o}"] = {_o}
+for _o in LOOPS:
+    HOL_FORMS[f"Loop {_o}"] = {_o}
+for _o in STRING_OPS:
+    HOL_FORMS[f"StringOp {_o}"] = {f"{_r}{_o}{_w}" for _r in ("", "REP_", "REPE_", "REPNE_")
+                                   for _w in "BWDQ"}
 for _p in PBINOPS:
     HOL_FORMS[f"Pbinop {_p}"] = {_p} | ({"XORPS"} if _p == "PXOR" else set())
 
@@ -494,6 +518,7 @@ def main() -> None:
     per_iform: dict[str, Counter] = defaultdict(Counter)
     per_row: dict[str, Counter] = defaultdict(Counter)
     mismatches = []
+    disagreements = []
     for (iform, row, word), h, l in zip(picked, hol, llvm):
         xed_length = len(word) if iform else None
         allowed = HOL_FORMS.get(hol_key(h.text), set()) if h.length else set()
@@ -506,7 +531,11 @@ def main() -> None:
                 ("class", iform is not None and iform.iclass not in allowed),
                 ("vendor-defined", iform is not None and vendor_defined(iform.iclass, word)))
                 if bad]
-            if reasons:
+            llvm_only = {"llvm-objdump rejects", "llvm-objdump length"}
+            if reasons and set(reasons) <= llvm_only:
+                disagreements.append({"word": word.hex(), "hol": h.text, "xed": iform and iform.name,
+                                      "llvm": l.text})
+            elif reasons:
                 mismatches.append({"word": word.hex(), "hol": h.text, "length": h.length,
                                    "xed": iform and iform.name, "llvm": l.text,
                                    "reasons": reasons})
@@ -554,12 +583,17 @@ def main() -> None:
     for m in mismatches[:20]:
         print(f"  {m['word']} {m['hol']} ({m['length']} bytes): {', '.join(m['reasons'])}; "
               f"XED {m['xed']}, llvm-objdump {m['llvm']}")
+    print(f"words XED and HOL4 read alike that llvm-objdump rejects or reads otherwise: "
+          f"{len(disagreements)}")
+    for d in disagreements[:5]:
+        print(f"  {d['word']} {d['hol']}: XED {d['xed']}, llvm-objdump {d['llvm']}")
     if args.json:
         args.json.write_text(json.dumps({"xed_commit": xed_commit,
                                          "tiers": {t: {s: c[s] for s in STATES}
                                                    for t, c in tiers.items()},
                                          "iforms": report,
-                                         "rows": per_row, "mismatches": mismatches},
+                                         "rows": per_row, "mismatches": mismatches,
+                                         "reference_disagreements": disagreements},
                                         indent=1) + "\n")
 
 

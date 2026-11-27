@@ -152,7 +152,9 @@ def relative(d: Disassembled) -> str:
 def instruction(d: Disassembled) -> str:
     """The model's instruction for llvm-objdump's mnemonic and operands."""
     m, ops = d.mnemonic, d.operands
-    if m.startswith("nop") or m in ("pause", "endbr64"):
+    # 0F 18 /4 and /7 with a memory operand are hint NOPs that newer CPUs
+    # read as PREFETCHRST2 and PREFETCHIT0.
+    if m.startswith("nop") or m in ("pause", "endbr64", "endbr32", "prefetchrst2", "prefetchit0"):
         return "Nop"
     if m == "movdqa" and ops[0].startswith("%xmm"):
         return f"VecMov {xmm(ops[1])}w {xmm(ops[0])}w"

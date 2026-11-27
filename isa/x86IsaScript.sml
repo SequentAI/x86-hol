@@ -203,7 +203,7 @@ Datatype:
   | Ret word16                          (* C3; C2 iw *)
   | Xlat                                (* D7 *)
   | StringOp strop size rep             (* A4..A7, AA..AF *)
-  | Nop                                 (* 90, F3 90, 0F 1F /r, ENDBR64 *)
+  | Nop                                 (* 90, F3 90, and the hint NOPs 0F 0D, 0F 18..1F /r *)
   | VecLoad bool word4 address          (* 0F 10, F3 0F 6F /r: MOVUPS, MOVDQU xmm, m128;
                                            66 0F 6F /r: MOVDQA xmm, m128 (aligned, T) *)
   | VecStore address word4              (* 0F 11, F3 0F 7F /r: MOVUPS, MOVDQU m128, xmm *)
@@ -661,13 +661,13 @@ End
 (* 0F 38 F0, F1 and F6 after the prefixes, with the bytes from F0, F1 or F6
    on and the number of bytes from the 0F on: MOVBE (no repeat prefix, a
    memory operand), CRC32 (F2: a byte source from F0, a full-size one from
-   F1) and ADCX or ADOX (66 or F3, not both). *)
+   F1) and ADCX (66) or ADOX (F3, with or without 66). *)
 Definition decode_0f38_def:
   decode_0f38 pf [] = Truncated ∧
   decode_0f38 pf (c::rest) =
     let rex = pf.rex; bits = rex_bits rex; sz = op_size pf in
       if c = 0xF6w then
-        (if pf.opsize = (pf.rep = 0xF3w) ∨ pf.rep = 0xF2w then Rejected
+        (if pf.rep = 0xF2w ∨ ¬pf.opsize ∧ pf.rep ≠ 0xF3w then Rejected
          else case modrm_imm bits 0 rest of
                 Decoded (reg, rm, _) n =>
                   Decoded (Adx (pf.rep = 0xF3w) (if word_bit 3 rex then S64 else S32) reg rm) (3 + n)
@@ -698,12 +698,21 @@ Definition decode_0f_def:
     in
       if b = 0x38w ∧ (case rest of c::_ => c = 0xF0w ∨ c = 0xF1w ∨ c = 0xF6w | [] => T) then
         decode_0f38 pf rest
-      else if b = 0x1Ew ∧ pf.rep = 0xF3w then
-        (case rest of [] => Truncated | c::_ => if c = 0xFAw then Decoded Nop 3 else Rejected)
-      else if b = 0x1Fw then
-        (case modrm_imm bits 0 rest of
-           Decoded _ n => Decoded Nop (2 + n)
-         | other => unmatched other)
+      (* The hint NOPs, except the prefetches (0F 0D and 0F 18 /0..3 with a
+         memory operand), CLDEMOTE (0F 1C /0 with a memory operand and no
+         66, F2 or F3) and RDSSP (F3 0F 1E /1 with a register operand). *)
+      else if b = 0x0Dw ∨ 0x18w ≤₊ b ∧ b ≤₊ 0x1Fw then
+        (case rest of
+           [] => Truncated
+         | m::_ =>
+             let d = (5 >< 3) m : word3; mem = ((7 >< 6) m ≠ (3w:word2)) in
+               if b = 0x0Dw ∧ mem ∨ b = 0x18w ∧ mem ∧ d <₊ 4w ∨
+                  b = 0x1Cw ∧ mem ∧ d = 0w ∧ ¬pf.opsize ∧ pf.rep = 0w ∨
+                  b = 0x1Ew ∧ ¬mem ∧ d = 1w ∧ pf.rep = 0xF3w
+               then Rejected
+               else case modrm_imm bits 0 rest of
+                      Decoded _ n => Decoded Nop (2 + n)
+                    | other => unmatched other)
       else if b && 0xF0w = 0x40w then
         (case modrm_imm bits 0 rest of
            Decoded (reg, rm, _) n => Decoded (Cmov (w2w b) sz reg rm) (2 + n)
@@ -714,13 +723,9 @@ Definition decode_0f_def:
                 Decoded d n => Decoded (Jcc (w2w b) d) (2 + n)
               | other => unmatched other)
       else if b && 0xF0w = 0x90w then
-        (case reg_field rest of
-           NONE => Truncated
-         | SOME d =>
-             if d ≠ 0w then Rejected
-             else case modrm_imm bits 0 rest of
-                    Decoded (_, rm, _) n => Decoded (Setcc (w2w b) (sized S8 rex rm)) (2 + n)
-                  | other => unmatched other)
+        (case modrm_imm bits 0 rest of
+           Decoded (_, rm, _) n => Decoded (Setcc (w2w b) (sized S8 rex rm)) (2 + n)
+         | other => unmatched other)
       else if b = 0xA3w ∨ b = 0xABw ∨ b = 0xB3w ∨ b = 0xBBw then
         (case modrm_imm bits 0 rest of
            Decoded (reg, rm, _) n => Decoded (Bt (bt_op ((4 >< 3) b)) sz rm reg) (2 + n)
@@ -818,7 +823,7 @@ Definition decode_vex_def:
                                    else Pdep (if pp = 3w then PDEP else PEXT) sz d v src)
                                 else Andn sz d v src) (4 + n)
                    | other => unmatched other)
-                else if op = 0xF3w ∧ pp = 0w ∧ word_bit 7 b1 then
+                else if op = 0xF3w ∧ pp = 0w then
                   (case reg_field modrm of
                      NONE => Truncated
                    | SOME g =>
