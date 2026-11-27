@@ -73,9 +73,11 @@ TIER2_ISA_SETS = {"SSE", "SSE2", "SSE3", "SSSE3", "SSE4", "SSE42", "AES", "PCLMU
                   "SSEMXCSR", "SSE_PREFETCH"}
 TIER3_ISA_SETS = {"AVX", "AVX2", "AVX2GATHER", "FMA", "F16C", "AVXAES", "RDWRFSGS"}
 
-# Classes placed by name, before the ISA set is consulted.
+# Classes placed by name, before the ISA set is consulted; CRC32 is tier 1 in
+# its SSE4.2 forms only (TIER1_FORMS).
+TIER1_FORMS = {("CRC32", "SSE42")}
 CLASS_TIERS = {
-    "CRC32": "1", "ENDBR64": "1",
+    "ENDBR64": "1",
     "LFENCE": "3", "MFENCE": "3", "SFENCE": "3", "SYSCALL": "3",
 }
 
@@ -101,6 +103,8 @@ def tier_of(iform: str, iclass: str, isa_set: str, category: str) -> tuple[str, 
     """The tier of an iform, and why it is outside tier 1 if a tier-1 set has it."""
     if category == "MMX":
         return "out", "MMX"
+    if (iclass, isa_set) in TIER1_FORMS:
+        return "1", ""
     if iclass in CLASS_TIERS:
         return CLASS_TIERS[iclass], ""
     if iclass.endswith("_LOCK"):
@@ -280,10 +284,19 @@ def xed_kit(cache: Path) -> Path:
                                      f"https://github.com/intelxed/{name}.git", commit],
                     ["checkout", "-q", "FETCH_HEAD"]):
             subprocess.run(["git", "-C", str(repo), *cmd], check=True)
+    # Install beside the kit and rename it into place, so that an interrupted
+    # or concurrent install never leaves a partial kit at its path.
+    staged = Path(tempfile.mkdtemp(prefix="xed-kit-", dir=cache))
     subprocess.run([sys.executable, "mfile.py", f"--jobs={os.cpu_count() or 4}", "--static",
-                    f"--install-dir={kit}", "install"], cwd=src / "xed", check=True,
+                    f"--install-dir={staged}", "install"], cwd=src / "xed", check=True,
                    stdout=subprocess.DEVNULL)
     shutil.rmtree(src)
+    try:
+        staged.rename(kit)
+    except OSError:
+        if not (kit / "lib" / "libxed.a").exists():
+            raise
+        shutil.rmtree(staged)  # another run installed the kit first
     return kit
 
 
