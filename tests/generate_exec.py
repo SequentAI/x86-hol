@@ -195,6 +195,10 @@ def run_unicorn(cases: list[ExecCase]) -> list[Outcome]:
         # so with one register for both, the upper two lanes come out wrong;
         # the backend writes the SDM's result instead.
         fix_xmm: list[tuple[int, int]] = []
+        # When a 32-bit CMPXCHG with a register destination fails, it writes
+        # the destination back, clearing its upper half, where hardware leaves
+        # the register alone; the backend restores it.
+        fix_reg: list[tuple[int, int]] = []
 
         def on_instruction(uc, address, size, _) -> None:
             if (bmi or fix_blsi) and uc.mem_read(address, 1) != b"\xcc":
@@ -202,6 +206,9 @@ def run_unicorn(cases: list[ExecCase]) -> list[Outcome]:
             if fix_xmm:
                 reg, value = fix_xmm.pop()
                 uc.reg_write(xmm[reg], value)
+            if fix_reg:
+                reg, value = fix_reg.pop()
+                uc.reg_write(order[reg], value)
             before_instruction[:] = [windows()]
             b = bytes(uc.mem_read(address, size))
             if size >= 5 and b[0] == 0xC4 and b[1] & 0x1F == 2 and b[2] & 0x03 == 0 \
@@ -213,6 +220,13 @@ def run_unicorn(cases: list[ExecCase]) -> list[Outcome]:
                 bmi.append(BmiFix(BMI_FIXED[b[3], b[2] & 3], (b[4] >> 3 & 7) | (~b[1] >> 4 & 8),
                                   64 if b[2] & 0x80 else 32,
                                   uc.reg_read(order[~b[2] >> 3 & 15]), rm))
+            rex = b[0] if 0x40 <= b[0] <= 0x4F else 0
+            op = b[1:] if rex else b
+            if op[:2] == b"\x0f\xb1" and len(op) == 3 and op[2] >> 6 == 3 and not rex & 8:
+                dest = (op[2] & 7) | (rex & 1) << 3
+                value = uc.reg_read(order[dest])
+                if uc.reg_read(order[0]) & M32 != value & M32:
+                    fix_reg.append((dest, value))
             rest = b[2:] if len(b) > 1 and 0x40 <= b[1] <= 0x4F else b[1:]
             if b[:1] == b"\x66" and rest[:3] == b"\x0f\x38\x02" and len(rest) == 4 \
                     and rest[3] >> 6 == 3:

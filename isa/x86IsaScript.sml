@@ -2566,7 +2566,11 @@ Definition execute_with_def:
              in
                if acc = a then next_rip len (write_operand ops sz (s with flags := f) len d b)
                else
-                 case write_operand ops sz (s with flags := f) len d a of
+                 (* On failure only a memory destination is written (back);
+                    a register keeps its upper half. *)
+                 case (case d of
+                         RmMem _ => write_operand ops sz (s with flags := f) len d a
+                       | _ => Next (s with flags := f)) of
                    Next t => Next (write_sized ops sz 0w a t with rip := s.rip + n2w len)
                  | Fault e => Fault e) ∧
   execute_with ops u (Cmpxchg2 wide m) len s =
