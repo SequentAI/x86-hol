@@ -37,6 +37,7 @@ Definition abstract_state_def:
        xmm := lookup_word 0w s.xmm;
        rip := s.rip;
        flags := s.flags;
+       df := s.df;
        mem := lookup_word 0w s.mem;
        perms := lookup_word no_access s.perms |>
 End
@@ -60,7 +61,8 @@ Triviality abstract_reads:
   functional_storage.get_byte (abstract_state s).mem a = finite_storage.get_byte s.mem a ∧
   functional_storage.get_perm (abstract_state s).perms a = finite_storage.get_perm s.perms a ∧
   (abstract_state s).rip = s.rip ∧
-  (abstract_state s).flags = s.flags
+  (abstract_state s).flags = s.flags ∧
+  (abstract_state s).df = s.df
 Proof
   simp[read_reg_def, read_xmm_def, functional_storage_def, finite_storage_def,
        abstract_state_def]
@@ -69,6 +71,7 @@ QED
 Triviality abstract_updates:
   (abstract_state s with rip := p) = abstract_state (s with rip := p) ∧
   (abstract_state s with flags := f) = abstract_state (s with flags := f) ∧
+  (abstract_state s with df := d) = abstract_state (s with df := d) ∧
   write_reg functional_storage r v (abstract_state s) =
     abstract_state (write_reg finite_storage r v s) ∧
   write_xmm functional_storage x w (abstract_state s) =
@@ -142,6 +145,31 @@ Proof
   rw[store128_def, abstract_access_ok, abstract_write_bytes, abstract_result_def]
 QED
 
+Triviality abstract_write_sized:
+  write_sized functional_storage sz r v (abstract_state s) =
+    abstract_state (write_sized finite_storage sz r v s)
+Proof
+  simp[write_sized_def, abstract_reads, abstract_updates]
+QED
+
+Triviality abstract_push:
+  push functional_storage sz v (abstract_state s) =
+    abstract_result (push finite_storage sz v s)
+Proof
+  PURE_REWRITE_TAC [push_def, LET_THM] >> BETA_TAC >>
+  REWRITE_TAC [abstract_reads, abstract_store] >>
+  Cases_on `store finite_storage (size_bytes sz) (read_reg finite_storage s 4w - n2w (size_bytes sz)) v s` >>
+  simp[abstract_result_def, abstract_updates]
+QED
+
+Triviality abstract_enter_frames:
+  ∀k fp s. enter_frames functional_storage sz k fp (abstract_state s) =
+           abstract_result (enter_frames finite_storage sz k fp s)
+Proof
+  Induct >> simp[enter_frames_def, abstract_result_def, abstract_load, abstract_push] >>
+  rpt gen_tac >> rpt CASE_TAC >> gvs[abstract_result_def]
+QED
+
 Triviality abstract_read_operand:
   read_operand functional_storage sz (abstract_state s) len d =
     read_operand finite_storage sz s len d
@@ -155,7 +183,7 @@ Triviality abstract_write_operand:
 Proof
   Cases_on `d` >>
   simp[write_operand_def, abstract_reads, abstract_updates, abstract_store,
-       abstract_address_of, abstract_result_def]
+       abstract_address_of, abstract_result_def, abstract_write_sized]
 QED
 
 Triviality abstract_next_rip:
@@ -172,6 +200,23 @@ Proof
   simp[read_aligned_xmm_def, abstract_reads, abstract_address_of, abstract_load128]
 QED
 
+Triviality abstract_string_step:
+  string_step functional_storage u op sz (abstract_state s) =
+    abstract_result (string_step finite_storage u op sz s)
+Proof
+  Cases_on `op` >>
+  simp[string_step_def, abstract_reads, abstract_load, abstract_store] >>
+  rpt CASE_TAC >>
+  gvs[abstract_result_def, abstract_updates, abstract_write_sized, abstract_reads]
+QED
+
+Triviality case_abstract_result:
+  (case abstract_result r of Next t => g t | Fault e => Fault e) =
+    (case r of Next t => g (abstract_state t) | Fault e => Fault e)
+Proof
+  Cases_on `r` >> simp[abstract_result_def]
+QED
+
 Triviality abstract_execute:
   execute_with functional_storage u i len (abstract_state s) =
     abstract_result (execute_with finite_storage u i len s)
@@ -179,13 +224,17 @@ Proof
   Cases_on `i` >>
   simp[execute_with_def, abstract_reads, abstract_access_ok, abstract_read_bytes,
        abstract_address_of, abstract_read_operand, abstract_load, abstract_load128,
-       abstract_read_aligned_xmm] >>
+       abstract_read_aligned_xmm, abstract_write_sized, abstract_push,
+       abstract_enter_frames, abstract_string_step] >>
   rpt CASE_TAC >>
   gvs[abstract_result_def, abstract_updates, abstract_write_operand, abstract_store,
-      abstract_store128, abstract_next_rip, abstract_reads] >>
+      abstract_store128, abstract_next_rip, abstract_reads, abstract_write_sized,
+      abstract_push, abstract_enter_frames, abstract_string_step] >>
   rpt (pairarg_tac >> gvs[]) >>
   rw[abstract_updates, abstract_write_operand, abstract_next_rip, abstract_result_def,
-     next_rip_def, abstract_reads]
+     next_rip_def, abstract_reads, abstract_write_sized, abstract_push] >>
+  gvs[case_abstract_result] >> rpt CASE_TAC >>
+  gvs[abstract_result_def, abstract_write_operand, abstract_next_rip]
 QED
 
 Definition step_cv_def:
@@ -299,6 +348,36 @@ Definition cv_write_operand_def:
   cv_write_operand sz s len d v = write_operand finite_storage sz s len d v
 End
 
+Definition cv_write_sized_def:
+  cv_write_sized sz r v s = write_sized finite_storage sz r v s
+End
+
+Definition cv_push_def:
+  cv_push sz v s = push finite_storage sz v s
+End
+
+Definition cv_enter_frames_def:
+  cv_enter_frames sz 0 (fp:word64) (s:finite_state) = Next s ∧
+  cv_enter_frames sz (SUC k) fp s =
+    let fp' = fp - n2w (size_bytes sz) in
+      case cv_load (size_bytes sz) fp' s of
+        NONE => Fault Load
+      | SOME v =>
+          case cv_push sz v s of
+            Next t => cv_enter_frames sz k fp' t
+          | Fault f => Fault f
+End
+
+Triviality cv_enter_frames_eq:
+  ∀k sz fp s. cv_enter_frames sz k fp s = enter_frames finite_storage sz k fp s
+Proof
+  Induct >> simp[cv_enter_frames_def, enter_frames_def, cv_load_def, cv_push_def]
+QED
+
+Definition cv_string_step_def:
+  cv_string_step u op sz s = string_step finite_storage u op sz s
+End
+
 Definition cv_execute_def:
   cv_execute u i len s = execute_with finite_storage u i len s
 End
@@ -307,7 +386,8 @@ val aliases = [cv_read_reg_def, cv_write_reg_def, cv_read_xmm_def, cv_write_xmm_
                cv_read_bytes_eq, cv_access_ok_eq, cv_fetchable_eq, cv_write_bytes_eq,
                cv_address_of_def, cv_load_def, cv_store_def, cv_load128_def,
                cv_store128_def, cv_read_aligned_xmm_def, cv_read_operand_def,
-               cv_write_operand_def, cv_execute_def, step_cv_def];
+               cv_write_operand_def, cv_write_sized_def, cv_push_def, cv_enter_frames_eq,
+               cv_string_step_def, cv_execute_def, step_cv_def];
 
 Triviality finite_storage_apply:
   finite_storage.get_reg f r = lookup_word 0w f r ∧
@@ -391,5 +471,7 @@ val () = app translate [cv_read_bytes_def, cv_access_ok_def, cv_fetchable_def,
                         cv_write_bytes_def];
 val () = app translate_specialised
   [read_reg_def, write_reg_def, read_xmm_def, write_xmm_def, address_of_def, load_def,
-   store_def, load128_def, store128_def, read_aligned_xmm_def, read_operand_def, write_operand_def,
-   execute_with_def, step_with_def];
+   store_def, load128_def, store128_def, read_aligned_xmm_def, write_sized_def, read_operand_def,
+   write_operand_def, push_def];
+val () = translate cv_enter_frames_def;
+val () = app translate_specialised [string_step_def, execute_with_def, step_with_def];

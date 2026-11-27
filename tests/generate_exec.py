@@ -114,7 +114,7 @@ def run_unicorn(cases: list[ExecCase]) -> list[Outcome]:
             uc.reg_write(reg, value)
         for reg, value in zip(xmm, case.xmm):
             uc.reg_write(reg, value)
-        uc.reg_write(x86.UC_X86_REG_EFLAGS, 0x2 | case.flags)
+        uc.reg_write(x86.UC_X86_REG_EFLAGS, 0x202 | case.flags)
         trapped = []
         uc.hook_add(unicorn.UC_HOOK_INTR, lambda uc, number, _: (trapped.append(number), uc.emu_stop()))
 

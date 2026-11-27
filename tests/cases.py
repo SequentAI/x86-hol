@@ -144,7 +144,7 @@ SAD_OPS = [
 
 def psrad(v: int, count: int) -> int:
     return lanes32([signed(lane(v, 32, i), 32) >> count for i in range(4)])
-AF, OF, SF, ZF, PF = 1 << 4, 1 << 11, 1 << 7, 1 << 6, 1 << 2
+CF, AF, OF, SF, ZF, PF = 1, 1 << 4, 1 << 11, 1 << 7, 1 << 6, 1 << 2
 
 # The supported PMOVZX/PMOVSX forms: mnemonic, opcode
 # after 66 0F 38, source and result lane widths in bytes, and signedness.
@@ -284,102 +284,31 @@ NOPS = [bytes.fromhex(h) for h in [
     "0f1f840000000000", "660f1f840000000000", "662e0f1f840000000000",
     "66662e0f1f840000000000", "66" * 6 + "2e0f1f840000000000"]]
 
-# Encodings the model rejects (Unsupported) although the CPU executes them:
-# unreached opcodes, and the neighbours of reached forms in width, operand
-# class, direction, group digit and condition code.
+# Encodings the model rejects (Unsupported) although llvm-objdump reads
+# them: forms outside the model (system, I/O, LOCK, FS/GS, 67, x87, MMX and
+# SSE beyond the slice), near branches with a 66 prefix, which Intel and AMD
+# execute differently, and prefix orders the CPU faults on.
 REJECTED = {name: bytes.fromhex(h) for name, h in [
-    ("addw (66 prefix)", "6601c0"),
-    ("cs add (2E prefix outside nop)", "2e01c0"),
-    ("add r64, r64 (REX.W 03, register source)", "4803c6"),
-    ("adc r32, m32 (13 without REX.W)", "1306"),
-    ("adc r64, r64 (REX.W 13, register source)", "4813c1"),
-    ("sub r32, m32 (2B without REX.W)", "2b06"),
-    ("sub r64, r64 (REX.W 2B, register source)", "482bc1"),
-    ("sbb r32, m32 (1B without REX.W)", "1b06"),
-    ("sbb r64, r64 (REX.W 1B, register source)", "481bc1"),
-    ("add to memory", "0107"),
-    ("mov r64, r64 (REX.W 8B, register source)", "488bc1"),
-    ("sar m64, imm8 (REX.W C1 /7 to memory)", "48c13f03"),
-    ("movzx r16, m16 (66 0F B7)", "660fb707"),
-    ("and m32, r32 (21 to memory)", "2107"),
-    ("xor m32, r32 (31 to memory)", "3107"),
-    ("cmp m32, r32 (39 to memory)", "3907"),
-    ("test m32, r32 (85 to memory)", "8507"),
-    ("not m32 (F7 /2 to memory)", "f717"),
-    ("sar m32, cl (D3 /7 to memory)", "d33f"),
-    ("or imm8 (83 /1)", "83c801"),
-    ("sub r32, imm8 (83 /5 without REX.W)", "83e801"),
-    ("sub m64, imm8 (REX.W 83 /5 to memory)", "48832f01"),
-    ("sbb r64, imm8 (REX.W 83 /3)", "4883d8ff"),
-    ("add m32, imm8 (83 /0 to memory)", "830701"),
-    ("sbb m32, imm8 (83 /3 to memory)", "831f01"),
-    ("cmp m64, imm8 (REX.W 83 /7 memory)", "48833f01"),
-    ("and r64, r64 (REX.W 21)", "4821c8"),
-    ("or to memory (09)", "0907"),
-    ("xor m8, r8 (30 to memory)", "300f"),
-    ("xor ah, cl (30, high-byte register)", "30cc"),
-    ("xor r64 via 30 with REX.W", "4830c8"),
-    ("mov r/m, imm32 (C7)", "c7c001000000"),
-    ("mov r32, r32 (8B, register source)", "8bc1"),
-    ("mov r8, m8 (8A)", "8a07"),
-    ("mov m8, ah (88, high-byte register)", "8827"),
-    ("mov m8, r8 with REX.W (REX.W 88)", "488807"),
-    ("mov r8, r8 (88, register destination)", "88c1"),
-    ("mov r16, m16 (66 8B)", "668b07"),
-    ("mov r16, r16 (66 89, register destination)", "6689c8"),
-    ("mov m16, r16 with REX.W (66 REX.W 89)", "66488907"),
-    ("mov m16 with two prefixes (66 2E 89)", "662e8907"),
-    ("movzx to a 64-bit register", "480fb607"),
-    ("movzx r32, r16 (0F B7, register source)", "0fb7c0"),
-    ("movzx r64, m16 (REX.W 0F B7)", "480fb707"),
-    ("movsxd r32 (63 without REX.W)", "63c1"),
-    ("cwde (98 without REX.W)", "98"),
-    ("lea r32 (8D without REX.W)", "8d07"),
-    ("neg r64 (REX.W F7 /3)", "48f7d8"),
-    ("neg m32 (F7 /3 to memory)", "f71f"),
-    ("mul r32 (F7 /4 without REX.W)", "f7e0"),
-    ("inc r32 (FF /0 without REX.W)", "ffc0"),
-    ("inc m64 (REX.W FF /0 to memory)", "48ff07"),
-    ("dec r32 (FF /1 without REX.W)", "ffc8"),
-    ("dec m64 (REX.W FF /1 to memory)", "48ff0f"),
-    ("call r/m64 (FF /2)", "ffd0"),
-    ("imul r32 (0F AF without REX.W)", "0fafc1"),
-    ("shl r32, imm8 (C1 /4)", "c1e003"),
-    ("sar r32, imm8 (C1 /7 without REX.W)", "c1f803"),
-    ("shr m32, imm8 (C1 /5 to memory)", "c12f03"),
-    ("shr r32, CL (D3 /5)", "d3e8"),
-    ("shl r32, 1 (D1 /4)", "d1e0"),
-    ("cmovge (0F 4D)", "0f4dc1"),
-    ("cmovl from memory", "0f4c07"),
-    ("setne (0F 95)", "0f95c0"),
-    ("setb ah (high-byte register)", "0f92c4"),
-    ("setb to memory", "0f9207"),
-    ("setb with a nonzero reg field", "0f92c8"),
-    ("push r64 with REX.W", "4850"),
-    ("push r16 (66 50)", "6650"),
-    ("pop r16 (66 58)", "6658"),
-    ("push imm8 (6A)", "6a01"),
-    ("pop r/m64 (8F /0)", "8fc0"),
-    ("leave (C9)", "c9"),
-    ("jo rel8 (70)", "7000"),
-    ("jl rel8 (7C)", "7c00"),
-    ("jmp rel32 (E9)", "e900000000"),
-    ("jl rel32 (0F 8C)", "0f8c00000000"),
-    ("jb rel32 (0F 82)", "0f8200000000"),
-    ("REX call rel32", "48e800000000"),
-    ("ret imm16", "c20800"),
-    ("REX ret", "48c3"),
-    ("xchg r8d, eax (REX.B 90)", "4190"),
-    ("xchg r8w, ax (66 REX.B 90)", "664190"),
-    ("pause (F3 90)", "f390"),
+    ("jmp rel8 with a 66 prefix", "66eb00"),
+    ("je rel8 with a 66 prefix", "667400"),
+    ("call rel32 with a 66 prefix", "66e800000000"),
+    ("ret with a 66 prefix", "66c3"),
+    ("mov from an FS address", "648b07"),
+    ("mov from a GS address", "658b07"),
+    ("mov with a 67 prefix", "678b07"),
+    ("add with both F2 and F3", "f2f301c0"),
+    ("syscall", "0f05"),
+    ("cpuid", "0fa2"),
+    ("rdtsc", "0f31"),
+    ("hlt", "f4"),
+    ("in al, dx", "ec"),
+    ("int 0x80", "cd80"),
+    ("ud2", "0f0b"),
+    ("mov to a segment register", "8ed8"),
+    ("far jmp through memory", "ff28"),
+    ("fld1 (x87)", "d9e8"),
     ("REX before a legacy prefix", "48660f1f00"),
-    ("nop with a nonzero reg field", "0f1f08"),
-    ("multi-byte nop with F2", "66f20f1f00"),
-    ("nop with a register operand", "0f1fc0"),
-    ("nop RIP-relative", "0f1f0500000000"),
-    ("nop without base", "0f1f042500000000"),
     ("16-byte nop over the 15-byte limit", "66" * 7 + "2e0f1f840000000000"),
-    ("add r32, r32 (03, register source)", "03c1"),
     ("movups xmm, xmm (0F 10, register source)", "0f10c1"),
     ("movups xmm, xmm (0F 11, register destination)", "0f11c1"),
     ("movups with REX.W", "480f1006"),
@@ -408,11 +337,6 @@ REJECTED = {name: bytes.fromhex(h) for name, h in [
     ("psrlq mmx (0F 73 /2 without 66)", "0f73d003"),
     ("pslld with REX.R (66 REX.R 0F 72 /6)", "66440f72f003"),
     ("psrlq with REX.R (66 REX.R 0F 73 /2)", "66440f73d003"),
-    ("crc32b from AH", "f20f38f0c4"),
-    ("crc32b with a qword destination", "f2480f38f0c1"),
-    ("crc32w", "66f20f38f1c1"),
-    ("crc32l", "f20f38f1c1"),
-    ("crc32q from memory", "f2480f38f107"),
     ("ptest from memory", "660f381707"),
     ("pmulld from memory", "660f384007"),
     ("pminud from memory", "660f383b07"),
@@ -429,7 +353,6 @@ REJECTED = {name: bytes.fromhex(h) for name, h in [
     ("movdqu xmm, xmm (F3 0F 7F, register destination)", "f30f7fc1"),
     ("movdqu store with REX.W", "f3480f7f07"),
     ("movsd (F2 0F 10)", "f20f1006"),
-    ("repne add (F2 01)", "f201c0"),
     ("F2 and 66 before 0F 70", "66f20f70c1d4"),
     ("pandn (66 0F DF)", "660fdfc1"),
     ("pcmpeqw (66 0F 75)", "660f75c1"),
@@ -536,150 +459,17 @@ REJECTED = {name: bytes.fromhex(h) for name, h in [
     ("movdqa with REX.W", "66480f6f06"),
     ("movapd (66 0F 28)", "660f2806"),
     ("REX before the mandatory prefix", "41660fefc1"),
-    ("bsf r64 (REX.W 0F BC without F3)", "480fbcc7"),
-    ("bsr r64 (REX.W 0F BD without F3)", "480fbdc7"),
-    ("lzcnt r32 (F3 0F BD without REX.W)", "f30fbdc7"),
-    ("tzcnt r32, m32 (memory source)", "f30fbc07"),
-    ("popcnt r32, m32 (memory source)", "f30fb807"),
-    ("tzcnt r16 (66 F3 0F BC)", "66f30fbcc1"),
-    ("popcnt r16 (66 F3 0F B8)", "66f30fb8c1"),
-    ("bsf r32 (0F BC without F3)", "0fbcc7"),
-    ("or r64, imm32 (REX.W 0D)", "480d00000100"),
-    ("or ax, imm16 (66 0D)", "660d0100"),
-    ("or al, imm8 (0C)", "0c01"),
-    ("or r32, imm32 (81 /1)", "81c900000100"),
-    ("add r32, imm32 (81 /0)", "81c001000000"),
-    ("xor r64, imm32 (REX.W 81 /6)", "4881f1ffff0000"),
-    ("xor m32, imm32 (81 /6 memory)", "8137ffff0000"),
-    ("xor eax, imm32 (35)", "35ffff0000"),
-    ("xor r32, imm8 (83 /6)", "83f101"),
-    ("sete to memory", "0f9407"),
-    ("sete ah (high-byte register)", "0f94c4"),
-    ("sete with REX.W", "480f94c0"),
-    ("setne (0F 95)", "0f95c0"),
-    ("seta (0F 97)", "0f97c0"),
-    ("tzcnt r64, m64 (memory source)", "f3480fbc07"),
-    ("lzcnt r64, m64 (memory source)", "f3480fbd07"),
-    ("popcnt r64, m64 (memory source)", "f3480fb807"),
-    ("cdq (99 without REX.W)", "99"),
-    ("cwd (66 99)", "6699"),
-    ("mul m64 (REX.W F7 /4 memory)", "48f727"),
-    ("imul m64 one operand (REX.W F7 /5 memory)", "48f72f"),
-    ("div m64 (REX.W F7 /6 memory)", "48f737"),
-    ("imul r32 one operand (F7 /5 without REX.W)", "f7e8"),
-    ("div m32 (F7 /6 memory)", "f737"),
-    ("idiv r32 (F7 /7 without REX.W)", "f7f9"),
-    ("idiv m64 (REX.W F7 /7 memory)", "48f73f"),
-    ("div r8 (F6 /6)", "f6f1"),
-    ("shld r64, r64, imm8 (REX.W 0F A4)", "480fa4c803"),
-    ("shrd r64, r64, imm8 (REX.W 0F AC)", "480facc803"),
-    ("shld r32, r32, cl (0F A5 without REX.W)", "0fa5c8"),
-    ("shrd r32, r32, cl (0F AD without REX.W)", "0fadc8"),
-    ("shld m64, r64, cl (memory destination)", "480fa507"),
-    ("shrd m64, r64, cl (memory destination)", "480fad07"),
-    ("bswap r32 (0F C8 without REX.W)", "0fc8"),
-    ("movbe r32, m32", "0f38f007"),
-    ("movbe m16, r16", "660f38f137"),
-    ("sar r64, cl (REX.W D3 /7)", "48d3f8"),
-    ("shr m64, cl (REX.W D3 /5 memory)", "48d32f"),
-    ("adc r32, r32 (11 without REX.W)", "11c8"),
-    ("sbb r32, r32 (19 without REX.W)", "19c8"),
-    ("sub r32, r32 (29 without REX.W)", "29c8"),
-    ("adc m64, r64 (REX.W 11 to memory)", "481107"),
-    ("adc r32, imm8 (83 /2 without REX.W)", "83d001"),
-    ("adc m64, imm8 (REX.W 83 /2 memory)", "48831701"),
-    ("setb with REX.W", "480f92c0"),
-    ("movzx r64, r8 (REX.W 0F B6, register source)", "480fb6c0"),
-    ("movzx from ah (0F B6, high-byte register)", "0fb6c4"),
-    ("adcx r32, r32", "660f38f6c1"),
-    ("adox r32, r32", "f30f38f6c1"),
-    ("adcx r64, m64", "66480f38f6842401000000"),
-    ("adox r64, m64", "f3480f38f6842401000000"),
-    ("rol r8, imm8 (C0 /0)", "c0c005"),
-    ("ror r8, cl (D2 /1)", "d2c8"),
-    ("rol r16, imm8 (66 C1 /0)", "66c1c005"),
-    ("ror r16, cl (66 D3 /1)", "66d3c8"),
-    ("rol r64, imm8 (REX.W C1 /0)", "48c1c005"),
-    ("ror r32, imm8 (C1 /1)", "c1c805"),
-    ("ror r64, imm8 (REX.W C1 /1)", "48c1c805"),
-    ("rol r32, cl (D3 /0)", "d3c0"),
-    ("ror r32, cl (D3 /1 without REX.W)", "d3c8"),
-    ("rol r64, cl (REX.W D3 /0)", "48d3c0"),
-    ("rol m32, imm8 (C1 /0 memory)", "c10703"),
-    ("ror m64, cl (REX.W D3 /1 memory)", "48d30f"),
-    ("rol r32, 1 (D1 /0)", "d1c0"),
-    ("jbe rel32 (0F 86)", "0f8600000000"),
-    ("js rel8 (78)", "7800"),
-    ("jne rel8 with REX", "407500"),
-    ("setge (0F 9D)", "0f9dc0"),
-    ("setle (0F 9E)", "0f9ec0"),
-    ("setl to memory", "0f9c07"),
-    ("setg with REX.W", "480f9fc0"),
-    ("cmovb r32 (0F 42 without REX.W)", "0f42c1"),
-    ("cmovae r64 (REX.W 0F 43)", "480f43c1"),
-    ("cmovl r64 from memory", "480f4c07"),
-    ("cmp m16, r16 (66 39 to memory)", "663907"),
-    ("cmp r8, m8 (3A)", "3a07"),
-    ("cmp r8, r8 (38, register destination)", "38c1"),
-    ("cmp m8 with REX.W (REX.W 38)", "483807"),
-    ("cmp ah to memory (38 without REX)", "382407"),
-    ("test m8, r8 (84 to memory)", "8407"),
-    ("test r8, r8 with REX.W", "4884c0"),
-    ("test ah, al (84 without REX)", "84c4"),
-    ("sub m8, r8 (28 to memory)", "2807"),
-    ("sub r8, r8 with REX.W", "4828c8"),
-    ("cmp m8, imm8 (80 /7 to memory)", "803f02"),
-    ("add r8, imm8 (80 /0)", "80c002"),
-    ("cmp ah, imm8 (80 /7 without REX)", "80fc02"),
-    ("shr r32, 1 (D1 /5 without REX.W)", "d1e8"),
-    ("sar r64, 1 (REX.W D1 /7)", "48d1f8"),
-    ("shr m64, 1 (REX.W D1 /5 to memory)", "48d12f"),
-    ("not m64 (REX.W F7 /2 to memory)", "48f717"),
-    ("mov m64, imm32 (REX.W C7 /0 to memory)", "48c70701000000"),
-    ("mov m64, imm32 (REX.W C7 /0 with RIP-relative memory)", "48c70501000000aa000000"),
-    ("movsbl from memory (0F BE)", "0fbe07"),
-    ("movsbq (REX.W 0F BE)", "480fbec1"),
-    ("movsbl ah (0F BE without REX)", "0fbec4"),
-    ("movswl (0F BF)", "0fbfc1"),
-    ("rcl r32, imm8 (C1 /2)", "c1d005"),
-    ("rcr r32, imm8 (C1 /3)", "c1d805"),
-    ("xor r64, m64 (REX.W 33)", "483307"),
-    ("xor r32, r32 (33, register source)", "33c1"),
-    ("mulx r32 (VEX.W0)", "c4e273f6c0"),
-    ("shlx r32 (VEX.W0)", "c4e271f7c0"),
-    ("andn r32 (VEX.W0)", "c4e270f2c0"),
-    ("bzhi r32 (VEX.W0)", "c4e270f5c0"),
-    ("blsr r32 (VEX.W0)", "c4e278f3c8"),
-    ("rorx from memory", "c4e3fbf00702"),
-    ("shlx from memory", "c4e2f1f707"),
-    ("andn from memory", "c4e2f0f207"),
-    ("bzhi from memory", "c4e2f0f507"),
-    ("blsr from memory", "c4e2f0f30f"),
-    ("blsi from memory", "c4e2f0f31f"),
-    ("blsmsk from memory", "c4e2f0f317"),
-    ("pdep r32 (VEX.W0)", "c4e273f5c0"),
-    ("pext r32 (VEX.W0)", "c4e272f5c0"),
-    ("bextr r32 (VEX.W0)", "c4e270f7c0"),
-    ("pdep from memory", "c4e2f3f507"),
-    ("pext from memory", "c4e2f2f507"),
-    ("bextr from memory", "c4e2f0f707"),
     ("andn with a 66 prefix", "66c4e2f0f2c0"),
     ("andn with an F3 prefix", "f3c4e2f0f2c0"),
     ("andn with a REX prefix", "40c4e2f0f2c0"),
     ("vzeroupper (C5)", "c5f877"),
     ("blsr with VEX.R set", "c462f0f3c8"),
-    ("jmpq *%rax with REX.W", "48ffe0"),
-    ("jmpq *%rax with REX.R", "44ffe0"),
-    ("jmpq *(%rax) (FF /4 memory)", "ff20"),
-    ("jg rel8 (7F)", "7f00"),
-    ("movslq without REX.W (63 /r memory)", "630c8a"),
 ]}
 
 # Rejected encodings, each with the length of the window ending at the byte
 # that already rules it out: the model must reject that window rather than
 # find it truncated.
-REJECTED_EARLY = {"blsr with VEX.R set": 4, "jmpq *%rax with REX.R": 2,
-                  "adcx r64, m64": 6, "adox r64, m64": 6,
+REJECTED_EARLY = {"blsr with VEX.R set": 4,
                   "psrad with REX.R (66 REX.R 0F 72 /4)": 4,
                   "pslldq with REX.W": 4, "pclmulqdq with REX.W": 5,
                   "pclmulqdq xmm, m128 (memory source)": 5,
@@ -690,8 +480,7 @@ REJECTED_EARLY = {"blsr with VEX.R set": 4, "jmpq *%rax with REX.R": 2,
                   "pshuflw with REX.W": 4,
                   "movsd with REX.W (F2 REX.W 0F 10)": 4, "pshufw mmx (0F 70 without a prefix)": 2,
                   "pslld with REX.R (66 REX.R 0F 72 /6)": 4,
-                  "psrlq with REX.R (66 REX.R 0F 73 /2)": 4,
-                  "crc32b with a qword destination": 5, "crc32l": 4}
+                  "psrlq with REX.R (66 REX.R 0F 73 /2)": 4}
 
 # Encodings the model rejects that llvm-objdump does not decode either: it
 # reports <unknown> at their first byte.
@@ -913,6 +702,7 @@ class CaseBuilder:
         self.pack_cases()
         self.madd_cases()
         self.sad_cases()
+        self.tier1_cases()
         return self.cases
 
     def data(self) -> bytes:
@@ -2501,6 +2291,653 @@ class CaseBuilder:
             xmm = self.xmm()
             self.add(f"{name} xmm4, xmm4", prefix + reg_op(opcode, 0, 4, 4), xmm=xmm,
                      expected_xmm=(4, result(xmm[4], xmm[4])))
+
+
+    # The general-purpose integer forms at every operand size, the stack,
+    # flag, control-transfer and string instructions.
+
+    def tier1_cases(self) -> None:
+        self.sized_alu_cases()
+        self.sized_move_cases()
+        self.extension_cases()
+        self.sized_unary_cases()
+        self.sized_shift_cases()
+        self.sized_rotate_cases()
+        self.sized_mul_div_cases()
+        self.sized_double_shift_cases()
+        self.exchange_cases()
+        self.bit_test_cases()
+        self.sized_extension_isa_cases()
+        self.sized_stack_cases()
+        self.flag_cases()
+        self.control_cases()
+        self.string_cases()
+        self.prefix_cases()
+
+    def byte_reg(self, high: bool) -> int:
+        """A byte register: without REX, 4..7 are AH, CH, DH and BH; with
+        REX (forced by the caller), any of the sixteen low bytes."""
+        return self.random.randrange(8 if high else 16)
+
+    def at_data(self, reg: int = RDI, offset: int = 64) -> list[int]:
+        regs = self.regs()
+        regs[reg] = DATA_BASE + offset
+        return regs
+
+    def sized_alu_cases(self) -> None:
+        r = self.random
+        for k, mnemonic in enumerate(["add", "or", "adc", "sbb", "and", "sub", "xor", "cmp"]):
+            undefined = AF if mnemonic in ("or", "and", "xor") else 0
+            base = 8 * k
+            for high in (True, False):
+                d, s = self.byte_reg(high), self.byte_reg(high)
+                self.add(f"{mnemonic}b r8, r8 ({'no REX' if high else 'REX'})",
+                         reg_op(bytes([base]), 0, s, d, force_rex=not high), undefined=undefined)
+            d, s = self.operand(), self.operand()
+            self.add(f"{mnemonic}w r16, r16", b"\x66" + reg_op(bytes([base + 1]), 0, s, d),
+                     undefined=undefined)
+            self.add(f"{mnemonic}l r32, r32 (reversed)", reg_op(bytes([base + 3]), 0, d, s),
+                     undefined=undefined)
+            g = self.operand(avoid=(RSP, RDI))
+            for name, code in [
+                    ("b m8, r8", mem_op(bytes([base + 2]), 0, g, Address(RDI), byte_reg=True)),
+                    ("b r8, m8", mem_op(bytes([base]), 0, g & 7, Address(RDI))),
+                    ("w m16, r16", mem_op(bytes([base + 3]), 0, g, Address(RDI), b"\x66")),
+                    ("w r16, m16", mem_op(bytes([base + 1]), 0, g, Address(RDI), b"\x66")),
+                    ("l r32, m32", mem_op(bytes([base + 1]), 0, g, Address(RDI)))]:
+                self.add(f"{mnemonic}{name}", code, self.at_data(), data=self.data(),
+                         undefined=undefined)
+            imm8, imm16 = r.getrandbits(8), r.getrandbits(16)
+            for high in (True, False):
+                d = self.byte_reg(high)
+                self.add(f"{mnemonic}b ${imm8:#x}, r8 ({'no REX' if high else 'REX'})",
+                         rex(0, 0, 0, d, not high) + bytes([0x80, 0xC0 | k << 3 | d & 7, imm8]),
+                         undefined=undefined)
+            d = self.operand()
+            self.add(f"{mnemonic}w ${imm16:#x}, r16",
+                     b"\x66" + reg_op(b"\x81", 0, k, d) + imm16.to_bytes(2, "little"),
+                     undefined=undefined)
+            self.add(f"{mnemonic}w ${imm8:#x} (sign-extended), r16",
+                     b"\x66" + reg_op(b"\x83", 0, k, d) + bytes([imm8]), undefined=undefined)
+            self.add(f"{mnemonic}b ${imm8:#x}, al", bytes([base + 4, imm8]), undefined=undefined)
+            self.add(f"{mnemonic}w ${imm16:#x}, ax",
+                     bytes([0x66, base + 5]) + imm16.to_bytes(2, "little"), undefined=undefined)
+            self.add(f"{mnemonic}l $imm32, m32",
+                     mem_op(b"\x81", 0, k, Address(RDI)) + r.getrandbits(32).to_bytes(4, "little"),
+                     self.at_data(), data=self.data(), undefined=undefined)
+            self.add(f"{mnemonic}b ${imm8:#x}, m8", mem_op(b"\x80", 0, k, Address(RDI)) + bytes([imm8]),
+                     self.at_data(), data=self.data(), undefined=undefined)
+        for high in (True, False):
+            d, s = self.byte_reg(high), self.byte_reg(high)
+            self.add(f"testb r8, r8 ({'no REX' if high else 'REX'})",
+                     reg_op(b"\x84", 0, s, d, force_rex=not high), undefined=AF)
+            self.add(f"testb $imm8, r8 ({'no REX' if high else 'REX'})",
+                     rex(0, 0, 0, d, not high) + bytes([0xF6, 0xC0 | d & 7, r.getrandbits(8)]),
+                     undefined=AF)
+        d, s = self.operand(), self.operand()
+        self.add("testw r16, r16", b"\x66" + reg_op(b"\x85", 0, s, d), undefined=AF)
+        self.add("testw $imm16, r16",
+                 b"\x66" + reg_op(b"\xf7", 0, 0, d) + r.getrandbits(16).to_bytes(2, "little"),
+                 undefined=AF)
+        self.add("testb $imm8, al", bytes([0xA8, r.getrandbits(8)]), undefined=AF)
+        self.add("testw $imm16, ax", b"\x66\xa9" + r.getrandbits(16).to_bytes(2, "little"),
+                 undefined=AF)
+        self.add("testl $imm32, eax", b"\xa9" + r.getrandbits(32).to_bytes(4, "little"),
+                 undefined=AF)
+        self.add("testq r64, m64", mem_op(b"\x85", 1, RAX, Address(RDI)), self.at_data(),
+                 data=self.data(), undefined=AF)
+
+    def sized_move_cases(self) -> None:
+        r = self.random
+        for high in (True, False):
+            d, s = self.byte_reg(high), self.byte_reg(high)
+            self.add(f"movb r8, r8 ({'no REX' if high else 'REX'})",
+                     reg_op(b"\x88", 0, s, d, force_rex=not high))
+            self.add(f"movb m8, r8 ({'no REX' if high else 'REX'})",
+                     mem_op(b"\x8a", 0, s, Address(RDI), force_rex=not high), self.at_data(),
+                     data=self.data())
+            self.add(f"movb r8, m8 ({'no REX' if high else 'REX'})",
+                     mem_op(b"\x88", 0, s, Address(RDI), force_rex=not high), self.at_data(),
+                     data=self.data())
+            self.add(f"movb $imm8, r8 ({'no REX' if high else 'REX'})",
+                     rex(0, 0, 0, d, not high) + bytes([0xB0 | d & 7, r.getrandbits(8)]))
+            self.add(f"movb $imm8, r8 (C6, {'no REX' if high else 'REX'})",
+                     rex(0, 0, 0, d, not high) + bytes([0xC6, 0xC0 | d & 7, r.getrandbits(8)]))
+        d, s = self.operand(), self.operand()
+        self.add("movw r16, r16", b"\x66" + reg_op(b"\x89", 0, s, d))
+        self.add("movw m16, r16", mem_op(b"\x8b", 0, s, Address(RDI), b"\x66"), self.at_data(),
+                 data=self.data())
+        self.add("movw $imm16, r16",
+                 b"\x66" + rex(0, 0, 0, d) + bytes([0xB8 | d & 7]) + r.getrandbits(16).to_bytes(2, "little"))
+        self.add("movw $imm16, r16 (C7)",
+                 b"\x66" + reg_op(b"\xc7", 0, 0, d) + r.getrandbits(16).to_bytes(2, "little"))
+        self.add("movw $imm16, m16", mem_op(b"\xc7", 0, 0, Address(RDI), b"\x66")
+                 + r.getrandbits(16).to_bytes(2, "little"), self.at_data(), data=self.data())
+        self.add("movb $imm8, m8", mem_op(b"\xc6", 0, 0, Address(RDI)) + bytes([r.getrandbits(8)]),
+                 self.at_data(), data=self.data())
+        self.add("movl $imm32, m32", mem_op(b"\xc7", 0, 0, Address(RDI))
+                 + r.getrandbits(32).to_bytes(4, "little"), self.at_data(), data=self.data())
+        self.add("movl $imm32, r32 (C7)", reg_op(b"\xc7", 0, 0, d) + r.getrandbits(32).to_bytes(4, "little"))
+        for i in range(3):
+            d = self.operand()
+            self.add(f"movabsq $imm64, {REG64[d]} #{i}",
+                     rex(1, 0, 0, d) + bytes([0xB8 | d & 7]) + self.value().to_bytes(8, "little"))
+        address = (DATA_BASE + 40).to_bytes(8, "little")
+        for prefix, w, size in [(b"", 0, "b"), (b"\x66", 0, "w"), (b"", 0, "l"), (b"", 1, "q")]:
+            opcode = 0xA0 if size == "b" else 0xA1
+            self.add(f"movabs{size} moffs, accumulator",
+                     prefix + rex(w, 0, 0, 0) + bytes([opcode]) + address, data=self.data())
+            self.add(f"movabs{size} accumulator, moffs",
+                     prefix + rex(w, 0, 0, 0) + bytes([opcode + 2]) + address, data=self.data())
+
+    def extension_cases(self) -> None:
+        """MOVZX and MOVSX at each destination size, MOVSXD without REX.W,
+        CBW, CWD and their wider forms, and LEA at 16 and 32 bits."""
+        for opcode, mnemonic in [(0xB6, "movzb"), (0xB7, "movzw"), (0xBE, "movsb"), (0xBF, "movsw")]:
+            for prefix, w, size in [(b"\x66", 0, "w"), (b"", 0, "l"), (b"", 1, "q")]:
+                if opcode in (0xB7, 0xBF) and size == "w":
+                    continue
+                d, s = self.operand(), self.operand()
+                regs = self.regs()
+                regs[s] = self.value() | 0x80
+                self.add(f"{mnemonic}{size} r, r", prefix + reg_op(bytes([0x0F, opcode]), w, d, s),
+                         regs)
+                self.add(f"{mnemonic}{size} m, r",
+                         mem_op(bytes([0x0F, opcode]), w, d, Address(RDI), prefix), self.at_data(),
+                         data=self.data())
+            if opcode in (0xB6, 0xBE):
+                self.add(f"{mnemonic}l from a high byte", bytes([0x0F, opcode, 0xC0 | 2 << 3 | 5]))
+        for prefix, mnemonic in [(b"", "movsxd r32"), (b"\x66", "movsxd r16")]:
+            d, s = self.operand(), self.operand()
+            self.add(f"{mnemonic}, r32", prefix + reg_op(b"\x63", 0, d, s))
+            self.add(f"{mnemonic}, m32", mem_op(b"\x63", 0, d, Address(RDI), prefix),
+                     self.at_data(), data=self.data())
+        for code, name in [(b"\x66\x98", "cbtw"), (b"\x98", "cwtl"), (b"\x48\x98", "cltq"),
+                           (b"\x66\x99", "cwtd"), (b"\x99", "cltd")]:
+            for i in range(3):
+                regs = self.regs()
+                regs[RAX] = self.value() ^ (self.random.getrandbits(1) << 7 | 1 << 15) * i
+                self.add(f"{name} #{i}", code, regs)
+        for prefix, mnemonic in [(b"\x66", "leaw"), (b"", "leal")]:
+            d = self.operand()
+            self.add(f"{mnemonic} m, r", mem_op(b"\x8d", 0, d, Address(RSI, RCX, 3, -0x40), prefix))
+
+    def sized_unary_cases(self) -> None:
+        for digit, mnemonic, opcode8, opcode in [(2, "not", 0xF6, 0xF7), (3, "neg", 0xF6, 0xF7),
+                                                 (0, "inc", 0xFE, 0xFF), (1, "dec", 0xFE, 0xFF)]:
+            for high in (True, False):
+                d = self.byte_reg(high)
+                regs = self.regs()
+                if high is False:
+                    regs[d] = self.random.choice([0, 0x7F, 0x80, 0xFF]) | self.value() & ~0xFF
+                self.add(f"{mnemonic}b r8 ({'no REX' if high else 'REX'})",
+                         rex(0, 0, 0, d, not high) + bytes([opcode8, 0xC0 | digit << 3 | d & 7]), regs)
+            d = self.operand()
+            regs = self.regs()
+            regs[d] = self.random.choice([0, 0x7FFF, 0x8000, 0xFFFF]) | self.value() & ~0xFFFF
+            self.add(f"{mnemonic}w r16", b"\x66" + reg_op(bytes([opcode]), 0, digit, d), regs)
+            self.add(f"{mnemonic}l r32", reg_op(bytes([opcode]), 0, digit, d))
+            self.add(f"{mnemonic}q r64", reg_op(bytes([opcode]), 1, digit, d))
+            for prefix, w, size, op in [(b"", 0, "b", opcode8), (b"\x66", 0, "w", opcode),
+                                        (b"", 0, "l", opcode), (b"", 1, "q", opcode)]:
+                self.add(f"{mnemonic}{size} m", mem_op(bytes([op]), w, digit, Address(RDI), prefix),
+                         self.at_data(), data=self.data())
+
+    def sized_shift_cases(self) -> None:
+        """SHL, SHR and SAR at 8 and 16 bits: counts masked to 5 bits, past
+        the width too, where SHL and SHR leave CF undefined."""
+        r = self.random
+        for digit, mnemonic in [(4, "shl"), (5, "shr"), (7, "sar")]:
+            for prefix, size, bits, op8 in [(b"", "b", 8, True), (b"\x66", "w", 16, False)]:
+                base = 0xC0 if op8 else 0xC1
+
+                def undefined(count: int) -> int:
+                    m = count & 31
+                    if m == 0:
+                        return 0
+                    return (AF | (OF if m != 1 else 0)
+                            | (CF if digit != 7 and m >= bits else 0))
+
+                for count in (0, 1, 3, bits - 1, bits, bits + 1, 31, 32 + 2):
+                    d = self.operand()
+                    self.add(f"{mnemonic}{size} ${count}, r{bits}",
+                             prefix + reg_op(bytes([base]), 0, digit, d, force_rex=op8) + bytes([count]),
+                             undefined=undefined(count))
+                d = self.operand()
+                self.add(f"{mnemonic}{size} r{bits} (by 1)",
+                         prefix + reg_op(bytes([base + 0x10]), 0, digit, d, force_rex=op8),
+                         undefined=undefined(1))
+                for count in (r.randrange(1, bits), bits + 2):
+                    regs = self.regs()
+                    regs[RCX] = r.getrandbits(56) << 8 | count
+                    d = self.operand(avoid=(RSP, RCX))
+                    self.add(f"{mnemonic}{size} %cl={count}, r{bits}",
+                             prefix + reg_op(bytes([base + 0x12]), 0, digit, d, force_rex=op8), regs,
+                             undefined=undefined(count))
+            self.add(f"{mnemonic}w $3, m16",
+                     mem_op(b"\xc1", 0, digit, Address(RDI), b"\x66") + b"\x03", self.at_data(),
+                     data=self.data(), undefined=AF | OF)
+        self.add("shlb $2, ah", b"\xc0\xe4\x02", undefined=AF | OF)
+
+    def sized_rotate_cases(self) -> None:
+        """ROL, ROR, RCL and RCR at every width; RCL and RCR rotate through
+        CF, by the masked count modulo the width + 1."""
+        r = self.random
+        for digit, mnemonic in [(0, "rol"), (1, "ror"), (2, "rcl"), (3, "rcr")]:
+            for prefix, w, size, bits in [(b"", 0, "b", 8), (b"\x66", 0, "w", 16),
+                                          (b"", 0, "l", 32), (b"", 1, "q", 64)]:
+                base = 0xC0 if bits == 8 else 0xC1
+
+                def undefined(count: int) -> int:
+                    return OF if count & (63 if bits == 64 else 31) > 1 else 0
+
+                counts = (0, 1, 2, bits - 1, bits, bits + 1, 31) if digit >= 2 or bits < 32 \
+                    else (1, bits + 1)
+                for count in counts:
+                    d = self.operand()
+                    self.add(f"{mnemonic}{size} ${count}, r{bits}",
+                             prefix + reg_op(bytes([base]), w, digit, d, force_rex=bits == 8)
+                             + bytes([count]), undefined=undefined(count))
+                d = self.operand()
+                self.add(f"{mnemonic}{size} r{bits} (by 1)",
+                         prefix + reg_op(bytes([base + 0x10]), w, digit, d, force_rex=bits == 8))
+                count = r.getrandbits(8)
+                regs = self.regs()
+                regs[RCX] = r.getrandbits(56) << 8 | count
+                d = self.operand(avoid=(RSP, RCX))
+                self.add(f"{mnemonic}{size} %cl={count}, r{bits}",
+                         prefix + reg_op(bytes([base + 0x12]), w, digit, d, force_rex=bits == 8),
+                         regs, undefined=undefined(count))
+            self.add(f"{mnemonic}w $5, m16",
+                     mem_op(b"\xc1", 0, digit, Address(RDI), b"\x66") + b"\x05", self.at_data(),
+                     data=self.data(), undefined=OF)
+        self.add("rclb $1, ch", b"\xd0\xd5")
+
+    def sized_mul_div_cases(self) -> None:
+        """MUL and IMUL into AX, DX:AX and EDX:EAX, the two- and three-operand
+        IMUL at each size, and DIV and IDIV at 8, 16 and 32 bits."""
+        r = self.random
+        mul_undefined = AF | SF | ZF | PF
+        for digit, mnemonic in [(4, "mul"), (5, "imul")]:
+            for high in (True, False):
+                s = self.byte_reg(high)
+                self.add(f"{mnemonic}b r8 ({'no REX' if high else 'REX'})",
+                         rex(0, 0, 0, s, not high) + bytes([0xF6, 0xC0 | digit << 3 | s & 7]),
+                         undefined=mul_undefined)
+            for prefix, w, size in [(b"\x66", 0, "w"), (b"", 0, "l")]:
+                for i in range(2):
+                    s = self.operand()
+                    self.add(f"{mnemonic}{size} {REG64[s]} #{i}", prefix + reg_op(b"\xf7", w, digit, s),
+                             undefined=mul_undefined)
+            self.add(f"{mnemonic}b m8", mem_op(b"\xf6", 0, digit, Address(RDI)), self.at_data(),
+                     data=self.data(), undefined=mul_undefined)
+        for prefix, w, size in [(b"\x66", 0, "w"), (b"", 0, "l"), (b"", 1, "q")]:
+            d, s = self.operand(), self.operand()
+            self.add(f"imul{size} r, r", prefix + reg_op(b"\x0f\xaf", w, d, s), undefined=mul_undefined)
+            self.add(f"imul{size} m, r", mem_op(b"\x0f\xaf", w, d, Address(RDI), prefix),
+                     self.at_data(), data=self.data(), undefined=mul_undefined)
+            imm = r.getrandbits(16 if size == "w" else 32).to_bytes(2 if size == "w" else 4, "little")
+            self.add(f"imul{size} $imm, r, r", prefix + reg_op(b"\x69", w, d, s) + imm,
+                     undefined=mul_undefined)
+            self.add(f"imul{size} $imm8, r, r", prefix + reg_op(b"\x6b", w, d, s)
+                     + bytes([r.getrandbits(8)]), undefined=mul_undefined)
+        # DIV and IDIV with quotients in range, out of range and a zero divisor.
+        for digit, mnemonic, signed_ in [(6, "div", False), (7, "idiv", True)]:
+            for prefix, w, size, bits in [(b"", 0, "b", 8), (b"\x66", 0, "w", 16),
+                                          (b"", 0, "l", 32)]:
+                for i, (q, rem, d) in enumerate([(None, None, None), (5, 2, 7), (1 << bits, 0, 3),
+                                                 (3, 0, 0)]):
+                    regs = self.regs()
+                    s = self.operand(avoid=(RSP, RAX, RDX))
+                    if d is None:
+                        d = r.randrange(1, 1 << bits)
+                        q, rem = r.randrange(0, 1 << bits - 1), r.randrange(0, d)
+                    if signed_ and i == 1:
+                        q, d = -q, d  # a negative quotient
+                    dividend = (q * d + rem) & ((1 << 2 * bits) - 1)
+                    regs[s] = r.getrandbits(64 - bits) << bits | d
+                    if bits == 8:
+                        regs[RAX] = r.getrandbits(48) << 16 | dividend
+                        code = rex(0, 0, 0, s, True) + bytes([0xF6, 0xC0 | digit << 3 | s & 7])
+                    else:
+                        regs[RAX] = r.getrandbits(64 - bits) << bits | dividend & ((1 << bits) - 1)
+                        regs[RDX] = r.getrandbits(64 - bits) << bits | dividend >> bits
+                        code = prefix + reg_op(b"\xf7", w, digit, s)
+                    self.add(f"{mnemonic}{size} {REG64[s]} #{i}", code, regs, undefined=FLAG_MASK)
+            self.add(f"{mnemonic}l m32", mem_op(b"\xf7", 0, digit, Address(RDI)),
+                     self.at_data(), data=bytes([0x10] * DATA_SIZE), undefined=FLAG_MASK)
+
+    def sized_double_shift_cases(self) -> None:
+        """SHLD and SHRD at 16 and 32 bits by an immediate and by CL; 16-bit
+        counts above 16 are undefined and left out."""
+        r = self.random
+        for opcode, mnemonic in [(0xA4, "shld"), (0xAC, "shrd")]:
+            for prefix, size, counts in [(b"\x66", "w", (0, 1, 5, 15, 16, 32 + 3)),
+                                         (b"", "l", (0, 1, 5, 31, 32, 33))]:
+                def undefined(count: int) -> int:
+                    m = count & 31
+                    return 0 if m == 0 else AF if m == 1 else AF | OF
+
+                for count in counts:
+                    d, s = self.operand(), self.operand()
+                    self.add(f"{mnemonic}{size} ${count}, r, r",
+                             prefix + reg_op(bytes([0x0F, opcode]), 0, s, d) + bytes([count]),
+                             undefined=undefined(count))
+                count = r.choice(counts)
+                regs = self.regs()
+                regs[RCX] = r.getrandbits(56) << 8 | count
+                d, s = self.operand(avoid=(RSP, RCX)), self.operand(avoid=(RSP, RCX))
+                self.add(f"{mnemonic}{size} %cl={count}, r, r",
+                         prefix + reg_op(bytes([0x0F, opcode + 1]), 0, s, d), regs,
+                         undefined=undefined(count))
+                self.add(f"{mnemonic}{size} $3, r, m",
+                         mem_op(bytes([0x0F, opcode]), 0, RAX, Address(RDI), prefix) + b"\x03",
+                         self.at_data(), data=self.data(), undefined=AF | OF)
+        for reg in (RAX, RSP, 9, 15):
+            self.add(f"bswapl {REG32[reg]}", rex(0, 0, 0, reg) + bytes([0x0F, 0xC8 + (reg & 7)]))
+
+    def exchange_cases(self) -> None:
+        """XCHG, XADD, CMPXCHG at each size, CMPXCHG8B and CMPXCHG16B, each
+        compare both equal and unequal."""
+        r = self.random
+        for high in (True, False):
+            d, s = self.byte_reg(high), self.byte_reg(high)
+            self.add(f"xchgb r8, r8 ({'no REX' if high else 'REX'})",
+                     reg_op(b"\x86", 0, s, d, force_rex=not high))
+            self.add(f"xaddb r8, r8 ({'no REX' if high else 'REX'})",
+                     reg_op(b"\x0f\xc0", 0, s, d, force_rex=not high))
+        for prefix, w, size in [(b"\x66", 0, "w"), (b"", 0, "l"), (b"", 1, "q")]:
+            d, s = self.operand(), self.operand()
+            self.add(f"xchg{size} r, r", prefix + reg_op(b"\x87", w, s, d))
+            self.add(f"xchg{size} r, m", mem_op(b"\x87", w, s, Address(RDI), prefix),
+                     self.at_data(), data=self.data())
+            self.add(f"xadd{size} r, r", prefix + reg_op(b"\x0f\xc1", w, s, d))
+            self.add(f"xadd{size} r, m", mem_op(b"\x0f\xc1", w, s, Address(RDI), prefix),
+                     self.at_data(), data=self.data())
+            for reg in (RCX, RSP, 8, 15):
+                self.add(f"xchg{size} {REG64[reg]}, accumulator",
+                         prefix + rex(w, 0, 0, reg) + bytes([0x90 + (reg & 7)]))
+        self.add("xchgb r8, m8", mem_op(b"\x86", 0, 5, Address(RDI)), self.at_data(),
+                 data=self.data())
+        for prefix, w, size, bits, opcode in [(b"", 0, "b", 8, 0xB0), (b"\x66", 0, "w", 16, 0xB1),
+                                              (b"", 0, "l", 32, 0xB1), (b"", 1, "q", 64, 0xB1)]:
+            for equal in (True, False):
+                regs = self.regs()
+                d, s = self.operand(avoid=(RSP, RAX)), self.operand()
+                if equal:
+                    regs[RAX] = r.getrandbits(64 - bits) << bits | regs[d] & ((1 << bits) - 1) \
+                        if bits < 64 else regs[d]
+                    if bits == 32:
+                        # QEMU writes EAX back on success, clearing RAX's upper
+                        # half, where the SDM leaves the accumulator alone.
+                        regs[RAX] &= M32
+                self.add(f"cmpxchg{size} r, r ({'equal' if equal else 'unequal'})",
+                         prefix + reg_op(bytes([0x0F, opcode]), w, s, d, force_rex=bits == 8), regs)
+                regs = self.at_data()
+                data = self.data()
+                if equal:
+                    regs[RAX] = int.from_bytes(data[64:72], "little")
+                    if bits == 32:
+                        regs[RAX] &= M32
+                self.add(f"cmpxchg{size} r, m ({'equal' if equal else 'unequal'})",
+                         mem_op(bytes([0x0F, opcode]), w, s, Address(RDI), prefix), regs, data=data)
+        for w, name, width in [(0, "cmpxchg8b", 8), (1, "cmpxchg16b", 16)]:
+            for equal in (True, False):
+                regs = self.at_data()
+                data = self.data()
+                if equal:
+                    half = width // 2
+                    regs[RAX] = int.from_bytes(data[64:64 + half], "little")
+                    regs[RDX] = int.from_bytes(data[64 + half:64 + width], "little")
+                    if w == 0:
+                        regs[RAX] |= r.getrandbits(32) << 32
+                        regs[RDX] |= r.getrandbits(32) << 32
+                self.add(f"{name} m ({'equal' if equal else 'unequal'})",
+                         mem_op(b"\x0f\xc7", w, 1, Address(RDI)), regs, data=data)
+
+    def bit_test_cases(self) -> None:
+        """BT, BTS, BTR and BTC by a register and by an immediate, on
+        registers and on memory, where a register offset reaches the bit
+        string's other bytes; BSF and BSR of nonzero sources."""
+        r = self.random
+        bt_undefined = OF | SF | AF | PF
+        for k, mnemonic in enumerate(["bt", "bts", "btr", "btc"]):
+            opcode = 0xA3 + 8 * k
+            for prefix, w, size, bits in [(b"\x66", 0, "w", 16), (b"", 0, "l", 32),
+                                          (b"", 1, "q", 64)]:
+                d, s = self.operand(), self.operand()
+                self.add(f"{mnemonic}{size} r, r", prefix + reg_op(bytes([0x0F, opcode]), w, s, d),
+                         undefined=bt_undefined)
+                for offset in (r.randrange(-700, 700), -1, bits):
+                    regs = self.at_data(offset=128)
+                    s = self.operand(avoid=(RSP, RDI))
+                    regs[s] = r.getrandbits(64 - bits) << bits | offset & ((1 << bits) - 1) \
+                        if bits < 64 else offset & MASK64
+                    self.add(f"{mnemonic}{size} r={offset}, m",
+                             mem_op(bytes([0x0F, opcode]), w, s, Address(RDI), prefix), regs,
+                             data=self.data(), undefined=bt_undefined)
+                imm = r.getrandbits(8)
+                self.add(f"{mnemonic}{size} ${imm}, r",
+                         prefix + reg_op(b"\x0f\xba", w, 4 + k, d) + bytes([imm]),
+                         undefined=bt_undefined)
+                self.add(f"{mnemonic}{size} ${imm}, m",
+                         mem_op(b"\x0f\xba", w, 4 + k, Address(RDI), prefix) + bytes([imm]),
+                         self.at_data(), data=self.data(), undefined=bt_undefined)
+        for opcode, mnemonic in [(0xBC, "bsf"), (0xBD, "bsr")]:
+            for prefix, w, size, bits in [(b"\x66", 0, "w", 16), (b"", 0, "l", 32),
+                                          (b"", 1, "q", 64)]:
+                for value in (1, 1 << bits - 1, r.getrandbits(bits) | 1 << r.randrange(bits)):
+                    regs = self.regs()
+                    d, s = self.operand(), self.operand()
+                    regs[s] = r.getrandbits(64 - bits) << bits | value if bits < 64 else value
+                    self.add(f"{mnemonic}{size} {value:#x}",
+                             prefix + reg_op(bytes([0x0F, opcode]), w, d, s), regs,
+                             undefined=CF | OF | SF | AF | PF)
+                data = bytes([r.getrandbits(8) | 1 for _ in range(DATA_SIZE)])
+                self.add(f"{mnemonic}{size} m, r",
+                         mem_op(bytes([0x0F, opcode]), w, RAX, Address(RDI), prefix),
+                         self.at_data(), data=data, undefined=CF | OF | SF | AF | PF)
+        for opcode, mnemonic in [(0xBC, "tzcnt"), (0xBD, "lzcnt"), (0xB8, "popcnt")]:
+            undefined = 0 if mnemonic == "popcnt" else AF | OF | SF | PF
+            for prefix, size in [(b"\x66\xf3", "w"), (b"\xf3", "l")]:
+                for value in (0, 1, r.getrandbits(16)):
+                    regs = self.regs()
+                    d, s = self.operand(), self.operand()
+                    regs[s] = self.value() & ~0xFFFF | value
+                    self.add(f"{mnemonic}{size} {value:#x}",
+                             prefix + reg_op(bytes([0x0F, opcode]), 0, d, s), regs,
+                             undefined=undefined)
+                self.add(f"{mnemonic}{size} m, r",
+                         prefix + mem_op(bytes([0x0F, opcode]), 0, RDX, Address(RDI)),
+                         self.at_data(), data=self.data(), undefined=undefined)
+
+    def sized_extension_isa_cases(self) -> None:
+        """CRC32 from 8-, 16- and 32-bit sources, MOVBE at 16 and 32 bits,
+        ADCX and ADOX at 32 bits, and the BMI1 and BMI2 forms at 32 bits."""
+        r = self.random
+        for prefix, w, opcode, name in [(b"\xf2", 0, 0xF0, "crc32b from a high byte"),
+                                        (b"\xf2", 1, 0xF0, "crc32b to a qword"),
+                                        (b"\x66\xf2", 0, 0xF1, "crc32w"),
+                                        (b"\xf2", 0, 0xF1, "crc32l")]:
+            d = self.operand()
+            s = r.randrange(4, 8) if "high" in name else self.operand()
+            self.add(f"{name} r", prefix + reg_op(bytes([0x0F, 0x38, opcode]), w, d, s))
+            self.add(f"{name} m", prefix + mem_op(bytes([0x0F, 0x38, opcode]), w, d & 7, Address(RDI)),
+                     self.at_data(), data=self.data())
+        for prefix, w, size in [(b"\x66", 0, "w"), (b"", 0, "l")]:
+            d = self.operand(avoid=(RSP, RDI))
+            self.add(f"movbe{size} m, r", mem_op(b"\x0f\x38\xf0", w, d, Address(RDI), prefix),
+                     self.at_data(), data=self.data())
+            self.add(f"movbe{size} r, m", mem_op(b"\x0f\x38\xf1", w, d, Address(RDI), prefix),
+                     self.at_data(), data=self.data())
+        for prefix, mnemonic in [(b"\x66", "adcxl"), (b"\xf3", "adoxl")]:
+            for flags in (0, FLAG_MASK):
+                d, s = self.operand(), self.operand()
+                self.add(f"{mnemonic} r, r, flags {flags:#x}",
+                         prefix + reg_op(b"\x0f\x38\xf6", 0, d, s), flags=flags)
+            self.add(f"{mnemonic} m, r", prefix + mem_op(b"\x0f\x38\xf6", 0, RAX, Address(RDI)),
+                     self.at_data(), data=self.data())
+        for w in (0, 1):
+            size = "q" if w else "l"
+            d, a, b = self.operand(), self.operand(), self.operand()
+            for name, mmmmm, pp, opcode, reg, v, undefined in [
+                    ("andn", 2, 0, 0xF2, d, a, AF | PF),
+                    ("bzhi", 2, 0, 0xF5, d, a, AF | PF),
+                    ("pdep", 2, 3, 0xF5, d, a, 0),
+                    ("pext", 2, 2, 0xF5, d, a, 0),
+                    ("bextr", 2, 0, 0xF7, d, a, AF | PF | SF),
+                    ("mulx", 2, 3, 0xF6, d, a, 0),
+                    ("shlx", 2, 1, 0xF7, d, a, 0),
+                    ("sarx", 2, 2, 0xF7, d, a, 0),
+                    ("shrx", 2, 3, 0xF7, d, a, 0),
+                    ("blsr", 2, 0, 0xF3, 1, d, AF | PF),
+                    ("blsmsk", 2, 0, 0xF3, 2, d, AF | PF),
+                    # QEMU clears CF here where the SDM sets it for a nonzero
+                    # source; the blsiq register cases check CF.
+                    ("blsi", 2, 0, 0xF3, 3, d, AF | PF | CF)]:
+                if w == 0:
+                    self.add(f"{name}{size} r", vex_reg(mmmmm, pp, w, opcode, reg, v, b),
+                             undefined=undefined)
+                self.add(f"{name}{size} m", vex_mem(mmmmm, pp, w, opcode, reg, v, Address(RDI)),
+                         self.at_data(), data=self.data(), undefined=undefined)
+            if w == 0:
+                self.add("rorxl r", vex_reg(3, 3, 0, 0xF0, d, 0, b) + bytes([r.getrandbits(8)]))
+            self.add(f"rorx{size} m", vex_mem(3, 3, w, 0xF0, d, 0, Address(RDI))
+                     + bytes([r.getrandbits(8)]), self.at_data(), data=self.data())
+
+    def sized_stack_cases(self) -> None:
+        """PUSH and POP of words, memory and immediates, PUSHF and POPF, and
+        LEAVE and ENTER at every nesting level the tests reach."""
+        r = self.random
+        for reg in (RAX, RSP, 12):
+            self.add(f"pushw {REG16[reg]}", b"\x66" + rex(0, 0, 0, reg) + bytes([0x50 + (reg & 7)]),
+                     stack_watch=16)
+            self.add(f"popw {REG16[reg]}", b"\x66" + rex(0, 0, 0, reg) + bytes([0x58 + (reg & 7)]),
+                     ret_addr=r.getrandbits(64), stack_watch=16)
+        self.add("pushq with REX.W", b"\x48\x53", stack_watch=16)
+        for prefix, size in [(b"", "q"), (b"\x66", "w")]:
+            d = self.operand()
+            self.add(f"push{size} r (FF /6)", prefix + reg_op(b"\xff", 0, 6, d), stack_watch=16)
+            self.add(f"push{size} m", mem_op(b"\xff", 0, 6, Address(RDI), prefix), self.at_data(),
+                     data=self.data(), stack_watch=16)
+            self.add(f"pop{size} r (8F /0)", prefix + reg_op(b"\x8f", 0, 0, d),
+                     ret_addr=r.getrandbits(64), stack_watch=16)
+            self.add(f"pop{size} m", mem_op(b"\x8f", 0, 0, Address(RDI), prefix), self.at_data(),
+                     data=self.data(), ret_addr=r.getrandbits(64), stack_watch=16)
+        for imm in (0x7F, 0x80, r.getrandbits(8)):
+            self.add(f"pushq ${imm:#x} (6A)", bytes([0x6A, imm]), stack_watch=16)
+            self.add(f"pushw ${imm:#x} (66 6A)", bytes([0x66, 0x6A, imm]), stack_watch=16)
+        imm = r.getrandbits(32)
+        self.add(f"pushq ${imm:#x} (68)", b"\x68" + imm.to_bytes(4, "little"), stack_watch=16)
+        self.add("pushw $imm16 (66 68)", b"\x66\x68" + imm.to_bytes(4, "little")[:2], stack_watch=16)
+        for i in range(3):
+            self.add(f"pushfq #{i}", b"\x9c", stack_watch=16)
+        self.add("pushfw", b"\x66\x9c", stack_watch=16)
+        # TF, NT, AC and ID stay clear: the model leaves them out.
+        for i in range(4):
+            value = r.getrandbits(64) & (FLAG_MASK | 1 << 10 | 1 << 9) | 2
+            self.add(f"popfq {value:#x}", b"\x9d", ret_addr=value, stack_watch=16)
+        self.add("popfw", b"\x66\x9d", ret_addr=r.getrandbits(64) & ~0xFFFF | FLAG_MASK | 2,
+                 stack_watch=16)
+        for prefix, size in [(b"", "q"), (b"\x66", "w")]:
+            regs = self.regs()
+            regs[RBP] = STACK_TOP - 0x20
+            self.add(f"leave{size}", prefix + b"\xc9", regs, stack_watch=64)
+        for size, level, prefix in [(0x20, 0, b""), (0x18, 1, b""), (0x08, 2, b""), (0, 3, b""),
+                                    (0x10, 0, b"\x66"), (0x10, 1, b"\x66"), (0x10, 0x21, b"")]:
+            regs = self.regs()
+            regs[RBP] = STACK_TOP - 0x20
+            self.add(f"enter ${size:#x}, ${level}{' (66)' if prefix else ''}",
+                     prefix + b"\xc8" + size.to_bytes(2, "little") + bytes([level]), regs,
+                     stack_watch=128)
+
+    def flag_cases(self) -> None:
+        for code, name in [(b"\x9f", "lahf"), (b"\x9e", "sahf"), (b"\xf8", "clc"), (b"\xf9", "stc"),
+                           (b"\xf5", "cmc"), (b"\xfc", "cld"), (b"\xfd", "std")]:
+            for i in range(2):
+                self.add(f"{name} #{i}", code)
+
+    def control_cases(self) -> None:
+        """CALL and JMP through registers and memory, LOOP, LOOPE, LOOPNE
+        and JRCXZ, RET imm16, and XLAT."""
+        r = self.random
+        target = CODE_BASE + 0x40
+        regs = self.regs()
+        d = self.operand(avoid=(RSP,))
+        regs[d] = target
+        self.add(f"callq *{REG64[d]}", reg_op(b"\xff", 0, 2, d), regs, stack_watch=16)
+        data = target.to_bytes(8, "little") * (DATA_SIZE // 8)
+        for digit, name in [(2, "callq"), (4, "jmpq")]:
+            self.add(f"{name} *m", mem_op(b"\xff", 0, digit, Address(RDI)), self.at_data(), data=data,
+                     stack_watch=16)
+        for opcode, name in [(0xE2, "loop"), (0xE1, "loope"), (0xE0, "loopne"), (0xE3, "jrcxz")]:
+            for count in (0, 1, 2):
+                for zf in (0, ZF):
+                    regs = self.regs()
+                    regs[RCX] = count
+                    self.add(f"{name} rcx={count} zf={zf >> 6}", bytes([opcode, r.choice([-20, 4, 30]) & 0xFF]),
+                             regs, flags=self.flags() & ~ZF | zf)
+        for imm in (0, 8, 0x100):
+            self.add(f"retq ${imm:#x}", b"\xc2" + imm.to_bytes(2, "little"),
+                     ret_addr=CODE_BASE + r.randrange(0, 0x200, 3), stack_watch=16)
+        for i in range(3):
+            regs = self.regs()
+            regs[RBX] = DATA_BASE
+            regs[RAX] = self.value() & ~0xFF | r.randrange(DATA_SIZE)
+            self.add(f"xlatb #{i}", b"\xd7", regs, data=self.data())
+
+    def string_cases(self) -> None:
+        """MOVS, CMPS, STOS, LODS and SCAS at each size, alone, with REP,
+        REPE and REPNE prefixes, and backwards with DF set."""
+        r = self.random
+        for opcode, name in [(0xA4, "movs"), (0xA6, "cmps"), (0xAA, "stos"), (0xAC, "lods"),
+                             (0xAE, "scas")]:
+            compares = name in ("cmps", "scas")
+            for prefix, w, size, width in [(b"", 0, "b", 1), (b"\x66", 0, "w", 2),
+                                           (b"", 0, "l", 4), (b"", 1, "q", 8)]:
+                op = prefix + rex(w, 0, 0, 0) + bytes([opcode + (width > 1)])
+                for rep, count in [(b"", None), (b"\xf3", 0), (b"\xf3", 3), (b"\xf2", 3)]:
+                    for backwards in ((False, True) if rep == b"\xf3" and count else (False,)):
+                        data = bytearray(self.data())
+                        data[160:200] = data[40:80]  # matching runs for CMPS
+                        data[r.randrange(40, 80) + 120] ^= 0x5A
+                        regs = self.regs()
+                        regs[RSI] = DATA_BASE + (64 if backwards else 40)
+                        regs[RDI] = DATA_BASE + (184 if backwards else 160)
+                        if count is not None:
+                            regs[RCX] = count
+                        if name == "scas":
+                            regs[RAX] = int.from_bytes(data[160:168], "little")
+                        code = rep + op
+                        label = f"{(rep.hex() + ' ') if rep else ''}{name}{size}"
+                        if backwards:
+                            self.add(f"std; {label}; cld", b"\xfd" + code + b"\xfc", regs,
+                                     data=bytes(data), single=False)
+                        else:
+                            self.add(f"{label} rcx={count}", code, regs, data=bytes(data))
+        regs = self.regs()
+        regs[RSI], regs[RDI], regs[RCX] = DATA_BASE, DATA_BASE + 128, 5
+        self.add("rep movsq overlapping forwards", b"\xf3\x48\xa5", regs, data=self.data())
+
+    def prefix_cases(self) -> None:
+        """Null segment prefixes, repeat prefixes the opcode ignores, REX
+        prefixes on forms without register fields, and the NOP forms."""
+        load = mem_op(b"\x8b", 0, RAX, Address(RDI))
+        for segment in (b"\x2e", b"\x3e", b"\x26", b"\x36"):
+            self.add(f"{segment.hex()} movl m32, r32", segment + load, self.at_data(),
+                     data=self.data())
+        self.add("66 2e movw r16, m16", b"\x66\x2e" + mem_op(b"\x89", 0, RCX, Address(RDI)),
+                 self.at_data(), data=self.data())
+        for rep in (b"\xf2", b"\xf3"):
+            self.add(f"{rep.hex()} addl r32, r32", rep + reg_op(b"\x01", 0, RCX, RAX))
+        self.add("REX ret", b"\x48\xc3", ret_addr=CODE_BASE + 0x30)
+        self.add("REX call rel32", b"\x48" + rel32(b"\xe8", 0x20), stack_watch=16)
+        self.add("REX jne rel8", b"\x40\x75\x10")
+        self.add("jmpq *%rax with REX.R", b"\x44\xff\xe0",
+                 [CODE_BASE + 0x40 if i == RAX else v for i, v in enumerate(self.regs())])
+        for nop in ["f390", "0f1fc0", "0f1f08", "0f1f0500000000", "0f1f042500000000", "66f20f1f00",
+                    "f30f1efa", "4890"]:
+            self.add(f"nop {nop}", bytes.fromhex(nop))
 
 
 def exec_cases() -> list[ExecCase]:

@@ -1,12 +1,13 @@
 # x86-hol
 
 An executable HOL4 model of x86-64 user-space instructions. It covers
-a subset of integer, SIMD and cryptographic instructions and rejects
-unsupported encodings.
+the general-purpose integer instructions of 64-bit user mode (the
+x86-64-v2 base with BMI1, BMI2, ADX, MOVBE and CRC32) and a subset of
+SIMD and cryptographic instructions, and rejects unsupported encodings.
 
 `x86Isa` defines instruction decoding and execution over a storage
 interface. Its state includes general-purpose and XMM registers, the
-instruction pointer, six boolean status flags, and byte-addressed memory
+instruction pointer, six boolean status flags, the direction flag, and byte-addressed memory
 with read, write and execute permissions. Each step takes its undefined
 flag values from an indexed stream. `x86IsaCv` instantiates the model
 with sparse trees, translates it with `cv_trans` for `cv_eval`, and
