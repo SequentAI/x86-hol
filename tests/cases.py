@@ -1360,6 +1360,13 @@ class CaseBuilder:
             for i, reg in enumerate(byte_regs):
                 flags = [0, CF, ZF, SF, OF, SF | OF, ZF | SF, None][i % 8]
                 self.add(f"{mnemonic} {REG8[reg]}", reg_op(opcode, 0, 0, reg), flags=flags)
+        for cc, mnemonic in [(0, "seto"), (1, "setno"), (8, "sets"), (10, "setp"), (11, "setnp"),
+                             (13, "setge"), (14, "setle")]:
+            for i, flags in enumerate([0, OF, SF, PF, SF | OF, ZF]):
+                # Odd cases take an 8-bit displacement, even ones a 32-bit one.
+                a = Address(RDI, disp=8 * i if i % 2 else 0x90 + i)
+                self.add(f"{mnemonic} m #{i}", mem_op(bytes([0x0F, 0x90 + cc]), 0, 0, a),
+                         self.at_data(offset=64 if i % 2 else 0), data=self.data(), flags=flags)
         for opcode, mnemonic in [(b"\x0f\x42", "cmovbq"), (b"\x0f\x4c", "cmovlq")]:
             for i, flags in enumerate([0, CF, SF, OF, SF | OF, None]):
                 d, s = self.operand(), self.operand()
@@ -2709,6 +2716,8 @@ class CaseBuilder:
                         regs[RDX] |= r.getrandbits(32) << 32
                 self.add(f"{name} m ({'equal' if equal else 'unequal'})",
                          mem_op(b"\x0f\xc7", w, 1, Address(RDI)), regs, data=data)
+        self.add("cmpxchg16b m (misaligned)", mem_op(b"\x0f\xc7", 1, 1, Address(RDI, disp=8)),
+                 self.at_data(), data=self.data())
 
     def bit_test_cases(self) -> None:
         """BT, BTS, BTR and BTC by a register and by an immediate, on

@@ -5,7 +5,8 @@ The inventory is every instruction form (XED iform) reached by a sweep of
 the 64-bit encoding space: each opcode of the one-byte, 0F, 0F 38 and
 0F 3A maps, under sets of legacy prefixes and REX bytes, followed by all
 256 values of the next byte (ModRM for most opcodes) and seeded random
-bytes; and the VEX opcode space under a sample of VEX prefixes. XED
+bytes; and the VEX opcode space under a sample of VEX prefixes, bare and
+after a few legacy prefix and REX byte orders. XED
 decodes the words for a Sapphire Rapids chip, so hint encodings that
 chip defines (CLDEMOTE, RDSSP) are those instructions and not NOPs.
 
@@ -18,7 +19,9 @@ Each iform is put in a tier by its XED ISA set and instruction class:
   out  system and I/O, x87 and MMX, AVX-512, and everything newer
 
 Words with a LOCK, FS or GS segment, or 67 address-size prefix are
-reported in rows of their own and do not count towards their iform.
+reported in rows of their own and do not count towards their iform, as are
+VEX words after a REX, 66, F2 or F3 byte, which the SDM makes #UD (XED
+reads some of them, such as 40 2E C4 ..., as the VEX instruction).
 
 Up to --samples words per tier-1 iform (an eighth of that per other iform
 and per prefix row), drawn from distinct prefix, REX and ModRM.mod
@@ -127,7 +130,8 @@ def tier_of(iform: str, iclass: str, isa_set: str, category: str) -> tuple[str, 
 
 # ---------------------------------------------------------------------------
 # What each HOL instruction may be. A key is the constructor, followed by
-# its first argument for the constructors in KEYED.
+# its first argument for the constructors in KEYED, and for StringOp its
+# width and repeat mode too.
 
 CONDITIONS = ["O", "NO", "B", "NB", "Z", "NZ", "BE", "NBE", "S", "NS", "P", "NP",
               "L", "NL", "LE", "NLE"]
@@ -143,7 +147,7 @@ STRING_OPS = ["MOVS", "CMPS", "STOS", "LODS", "SCAS"]
 KEYED = {"Binop", "BinopImm", "Shift", "Rotate", "MulWide", "Div", "ShiftDouble", "Adx",
          "BitCount", "ShiftX", "Bls", "Pdep", "Jcc", "Cmov", "Setcc", "Pbinop", "Pcmpd",
          "Pshufw", "Pshift", "Pshiftdq", "AesRound", "Movx", "Bt", "BtImm", "BitScan",
-         "Cmpxchg2", "FlagOp", "Loop", "StringOp"}
+         "Cmpxchg2", "FlagOp", "Loop"}
 
 HOL_FORMS: dict[str, set[str]] = {
     "MovImm": {"MOV"}, "Mov": {"MOV"}, "Movx T": {"MOVSX", "MOVSXD"}, "Movx F": {"MOVZX"},
@@ -182,6 +186,10 @@ HOL_FORMS: dict[str, set[str]] = {
     "Pinsrq": {"PINSRQ"}, "Pextrq": {"PEXTRQ"}, "Punpcklqdq": {"PUNPCKLQDQ"},
     "Pmovmskb": {"PMOVMSKB"}, "Movd": {"MOVD", "MOVQ"}, "MovqXmm": {"MOVQ"},
     "Pinsrd": {"PINSRD"}, "Pextrd": {"PEXTRD"}, "MovdXmm": {"MOVD"},
+    # Constructors the decoder had before tier 1, for measuring older commits.
+    "MovImm64": {"MOV"}, "Movzx": {"MOVZX"}, "Movsx": {"MOVSX"}, "Movsxd": {"MOVSXD"},
+    "Cdqe": {"CDQE"}, "Cqo": {"CQO"}, "Dec64": {"DEC"}, "MovbeLoad": {"MOVBE"},
+    "MovbeStore": {"MOVBE"}, "JmpReg": {"JMP"}, "Rotate T": {"ROL"}, "Rotate F": {"ROR"},
 }
 for _b in BINOPS:
     HOL_FORMS[f"Binop {_b}"] = HOL_FORMS[f"BinopImm {_b}"] = {_b}
@@ -196,14 +204,18 @@ for _o in FLAG_OPS:
 for _o in LOOPS:
     HOL_FORMS[f"Loop {_o}"] = {_o}
 for _o in STRING_OPS:
-    HOL_FORMS[f"StringOp {_o}"] = {f"{_r}{_o}{_w}" for _r in ("", "REP_", "REPE_", "REPNE_")
-                                   for _w in "BWDQ"}
+    for _size, _w in zip(("S8", "S16", "S32", "S64"), "BWDQ"):
+        for _rep, _r in (("NoRep", ""), ("RepE", "REP_" if _o in ("MOVS", "STOS", "LODS")
+                                         else "REPE_"), ("RepNE", "REPNE_")):
+            HOL_FORMS[f"StringOp {_o} {_size} {_rep}"] = {f"{_r}{_o}{_w}"}
 for _p in PBINOPS:
     HOL_FORMS[f"Pbinop {_p}"] = {_p} | ({"XORPS"} if _p == "PXOR" else set())
 
 
 def hol_key(instruction: str) -> str:
     words = instruction.split()
+    if words[0] == "StringOp":  # the width and repeat mode name XED's class
+        return " ".join(words[:4])
     return " ".join(words[:2]) if words[0] in KEYED else words[0]
 
 
@@ -222,6 +234,11 @@ PREFIX_SETS += [[0xF0], [0x64], [0x65], [0x67]]
 REXES = [None, *range(0x40, 0x50)]
 # A word's row: the prefixes that keep it from counting towards its iform.
 ROWS = {0xF0: "LOCK", 0x64: "FS/GS segment", 0x65: "FS/GS segment", 0x67: "address size"}
+BEFORE_VEX = "REX, 66, F2 or F3 before VEX"
+# Prefix orders swept before VEX words: segment prefixes are allowed there,
+# REX, 66, F2 and F3 make the word #UD.
+VEX_PREFIXES = [[0x2E], [0x40], [0x48], [0x66], [0xF2], [0xF3], [0x40, 0x2E], [0x2E, 0x40],
+                [0x2E, 0x66]]
 
 
 def heads() -> list[bytes]:
@@ -237,6 +254,13 @@ def heads() -> list[bytes]:
                 for op in range(256):
                     if escape != b"\x0f" or op not in (0x38, 0x3A):
                         out.append(pre + escape + bytes([op]))
+    for prefixes in VEX_PREFIXES:
+        for pp in range(4):
+            for op in range(256):
+                for mmmmm in (2, 3):
+                    for w in (0, 1):
+                        out.append(bytes(prefixes + [0xC4, 0xE0 | mmmmm, w << 7 | 0xF << 3 | pp,
+                                                     op]))
     for rxb in range(8):
         for vvvv in (0xF, 0x0, 0x5):
             for length in (0, 1):
@@ -253,11 +277,14 @@ def heads() -> list[bytes]:
 
 
 def row_of(word: bytes) -> str:
-    for b in word:
-        if b not in LEGACY:
-            return ""
+    for i, b in enumerate(word):
         if b in ROWS:
             return ROWS[b]
+        if b in (0xC4, 0xC5):
+            return BEFORE_VEX if any(p in (0x66, 0xF2, 0xF3) or p & 0xF0 == 0x40
+                                     for p in word[:i]) else ""
+        if b not in LEGACY and b & 0xF0 != 0x40:
+            return ""
     return ""
 
 
@@ -522,7 +549,7 @@ def main() -> None:
         sweep(probe, rng, iforms)
         rejected = rejected_words(probe, rng, args.rejected)
 
-    rows = sorted({""} | set(ROWS.values()))
+    rows = sorted({"", BEFORE_VEX} | set(ROWS.values()))
     # HOL4 decodes about 150 words a second, so iforms outside tier 1, and
     # the prefix rows, get an eighth of the samples.
     picked = [(iform, row, word) for iform in iforms.values() for row in rows
@@ -595,7 +622,7 @@ def main() -> None:
         for r in gaps:
             print(f"  {r['iform']} ({r['state']}, {r['decoded']}/{r['in_scope']})")
     for row in rows[1:]:
-        print(f"{row} prefix: {per_row[row]['words']} words, "
+        print(f"{row if row == BEFORE_VEX else row + ' prefix'}: {per_row[row]['words']} words, "
               f"{per_row[row]['decoded']} decoded by HOL4")
     print(f"words HOL4 decodes that the references reject or read otherwise: {len(mismatches)}")
     for m in mismatches[:20]:

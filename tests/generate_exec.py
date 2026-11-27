@@ -268,6 +268,8 @@ def run_unicorn(cases: list[ExecCase]) -> list[Outcome]:
             fault = kinds[error.errno]
         if trapped == [0]:  # interrupt 0: the divide error (#DE)
             fault = "divide"
+        if trapped == [13]:  # the #GP of a misaligned CMPXCHG16B
+            fault = "alignment"
         if misaligned:
             fault = "alignment"
         if fault:

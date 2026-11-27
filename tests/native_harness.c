@@ -180,7 +180,7 @@ int main(void) {
       uint64_t error = (uint64_t)caught_context.gregs[REG_ERR];
       printf("fault %s", error & 16 ? "fetch" : error & 2 ? "store" : "load");
     } else if (caught_signal == SIGSEGV && caught_context.gregs[REG_TRAPNO] == 13) {
-      printf("fault alignment"); /* the #GP of a misaligned legacy SIMD read */
+      printf("fault alignment"); /* the #GP of a misaligned legacy SIMD read or CMPXCHG16B */
     } else if (caught_signal == SIGFPE && caught_context.gregs[REG_TRAPNO] == 0) {
       printf("fault divide"); /* the divide error (#DE) of DIV and IDIV */
     } else {

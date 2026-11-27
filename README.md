@@ -9,7 +9,9 @@ SIMD and cryptographic instructions, and rejects unsupported encodings.
 interface. Its state includes general-purpose and XMM registers, the
 instruction pointer, six boolean status flags, the direction flag, and byte-addressed memory
 with read, write and execute permissions. Each step takes its undefined
-flag values from an indexed stream. `x86IsaCv` instantiates the model
+flag values from an indexed stream. A REP string instruction does one
+iteration per step, decrementing RCX and leaving the instruction pointer
+on itself until it finishes. `x86IsaCv` instantiates the model
 with sparse trees, translates it with `cv_trans` for `cv_eval`, and
 proves that the executable step refines the functional model.
 
