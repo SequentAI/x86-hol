@@ -237,12 +237,14 @@ def heads() -> list[bytes]:
                 for op in range(256):
                     if escape != b"\x0f" or op not in (0x38, 0x3A):
                         out.append(pre + escape + bytes([op]))
-    for rxb in (7, 0):
+    for rxb in range(8):
         for vvvv in (0xF, 0x0, 0x5):
             for length in (0, 1):
                 for pp in range(4):
                     for op in range(256):
-                        out.append(bytes([0xC5, rxb >> 2 << 7 | vvvv << 3 | length << 2 | pp, op]))
+                        if rxb in (7, 0):  # C5 has only VEX.R
+                            out.append(bytes([0xC5, rxb >> 2 << 7 | vvvv << 3 | length << 2 | pp,
+                                              op]))
                         for mmmmm in (1, 2, 3):
                             for w in (0, 1):
                                 out.append(bytes([0xC4, rxb << 5 | mmmmm,

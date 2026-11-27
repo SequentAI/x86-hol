@@ -313,7 +313,6 @@ REJECTED = {name: bytes.fromhex(h) for name, h in [
     ("prefetchw (0F 0D /1)", "0f0d08"),
     ("cldemote (0F 1C /0)", "0f1c00"),
     ("rdsspq (F3 REX.W 0F 1E /1)", "f3480f1ec8"),
-    ("REX before a legacy prefix", "48660f1f00"),
     ("16-byte nop over the 15-byte limit", "66" * 7 + "2e0f1f840000000000"),
     ("movups xmm, xmm (0F 10, register source)", "0f10c1"),
     ("movups xmm, xmm (0F 11, register destination)", "0f11c1"),
@@ -464,10 +463,10 @@ REJECTED = {name: bytes.fromhex(h) for name, h in [
     ("movq xmm, xmm (66 0F D6)", "660fd6c1"),
     ("movdqa with REX.W", "66480f6f06"),
     ("movapd (66 0F 28)", "660f2806"),
-    ("REX before the mandatory prefix", "41660fefc1"),
     ("andn with a 66 prefix", "66c4e2f0f2c0"),
     ("andn with an F3 prefix", "f3c4e2f0f2c0"),
     ("andn with a REX prefix", "40c4e2f0f2c0"),
+    ("andn after a REX byte and a 2E prefix", "402ec4e278f2c1"),
     ("vzeroupper (C5)", "c5f877"),
 ]}
 
@@ -1366,6 +1365,14 @@ class CaseBuilder:
                 d, s = self.operand(), self.operand()
                 self.add(f"{mnemonic} {REG64[s]}, {REG64[d]} #{i}", reg_op(opcode, 1, d, s),
                          flags=flags)
+        for flags in (0, CF):
+            d, s = self.operand(), self.operand()
+            self.add(f"cmovbw {REG16[s]}, {REG16[d]} cf={flags}",
+                     b"\x66" + reg_op(b"\x0f\x42", 0, d, s), flags=flags)
+            for prefix, w, size in [(b"\x66", 0, "w"), (b"", 0, "l"), (b"", 1, "q")]:
+                self.add(f"cmovb{size} m, r cf={flags}",
+                         mem_op(b"\x0f\x42", w, self.operand(avoid=(RSP, RDI)), Address(RDI), prefix),
+                         self.at_data(), data=self.data(), flags=flags)
         shapes = [Address(RDI, RAX), Address(RDI, RAX, 3), Address(RSI, disp=8),
                   Address(9, 10, 3, -8), Address(None, rip=True), Address(13, disp=0x10)]
         for k, (mnemonic, width) in enumerate([("cmpb", 1), ("cmpq", 8)]):
@@ -2847,7 +2854,8 @@ class CaseBuilder:
             self.add(f"popfq {value:#x}", b"\x9d", ret_addr=value, stack_watch=16)
         self.add("popfw", b"\x66\x9d", ret_addr=r.getrandbits(64) & ~0xFFFF | FLAG_MASK | 2,
                  stack_watch=16)
-        for prefix, size in [(b"", "q"), (b"\x66", "w")]:
+        for prefix, size in [(b"", "q"), (b"\x66", "w"), (b"\x66\x48", "q (66 REX.W)"),
+                             (b"\x2e\x66", "w (2E 66)")]:
             regs = self.regs()
             regs[RBP] = STACK_TOP - 0x20
             self.add(f"leave{size}", prefix + b"\xc9", regs, stack_watch=64)
@@ -2885,6 +2893,8 @@ class CaseBuilder:
                     regs[RCX] = count
                     self.add(f"{name} rcx={count} zf={zf >> 6}", bytes([opcode, r.choice([-20, 4, 30]) & 0xFF]),
                              regs, flags=self.flags() & ~ZF | zf)
+        for disp in (0x200, -0x80):
+            self.add(f"jmp rel32 {disp:+}", rel32(b"\xe9", disp))
         for imm in (0, 8, 0x100):
             self.add(f"retq ${imm:#x}", b"\xc2" + imm.to_bytes(2, "little"),
                      ret_addr=CODE_BASE + r.randrange(0, 0x200, 3), stack_watch=16)
@@ -2943,6 +2953,11 @@ class CaseBuilder:
         self.add("REX jne rel8", b"\x40\x75\x10")
         self.add("jmpq *%rax with REX.R", b"\x44\xff\xe0",
                  [CODE_BASE + 0x40 if i == RAX else v for i, v in enumerate(self.regs())])
+        # A REX byte counts only right before the opcode.
+        self.add("REX.W before 66: movb %ah, %al", bytes.fromhex("486688e0"))
+        self.add("two REX bytes: movq %rcx, %rax", bytes.fromhex("414889c8"))
+        self.add("REX before the mandatory prefix: pxor", bytes.fromhex("41660fefc1"))
+        self.add("REX before 66: nopw", bytes.fromhex("48660f1f00"))
         for nop in ["f390", "0f1fc0", "0f1f08", "0f1f0500000000", "0f1f042500000000", "66f20f1f00",
                     "f30f1efa", "4890", "f30f1efb", "0f1820", "0f1838"]:
             self.add(f"nop {nop}", bytes.fromhex(nop))

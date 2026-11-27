@@ -331,14 +331,16 @@ Definition decode_modrm_def:
         | other => unmatched other
 End
 
-(* Legacy prefixes in 64-bit mode: 66 (operand size, or a vector form's
-   mandatory prefix), F2 and F3 (repeat, or mandatory prefixes) and the null
-   segment overrides 2E, 3E, 26 and 36, which are ignored. LOCK, the FS and
-   GS overrides and the 67 address-size prefix are not modelled. *)
+(* Prefixes in 64-bit mode: 66 (operand size, or a vector form's mandatory
+   prefix), F2 and F3 (repeat, or mandatory prefixes), the null segment
+   overrides 2E, 3E, 26 and 36, which are ignored, and REX bytes (40-4F),
+   which count only right before the opcode. LOCK, the FS and GS overrides
+   and the 67 address-size prefix are not modelled. *)
 Definition split_prefixes_def:
   split_prefixes [] = ([], []) ∧
   split_prefixes (b::bs) =
-    if b = 0x66w ∨ b = 0xF2w ∨ b = 0xF3w ∨ b = 0x2Ew ∨ b = 0x3Ew ∨ b = 0x26w ∨ b = 0x36w then
+    if b = 0x66w ∨ b = 0xF2w ∨ b = 0xF3w ∨ b = 0x2Ew ∨ b = 0x3Ew ∨ b = 0x26w ∨ b = 0x36w ∨
+       b && 0xF0w = 0x40w then
       (let (ps, rest) = split_prefixes bs in (b::ps, rest))
     else ([], b::bs)
 End
@@ -346,6 +348,11 @@ End
 Definition has_prefix_def:
   has_prefix (p:word8) [] = F ∧
   has_prefix p (b::bs) = (b = p ∨ has_prefix p bs)
+End
+
+Definition has_rex_def:
+  has_rex [] = F ∧
+  has_rex (b::bs) = (b && 0xF0w = 0x40w ∨ has_rex bs)
 End
 
 (* What the prefixes say: an operand-size (66) prefix, the repeat prefix (F2
@@ -1019,19 +1026,21 @@ Definition decode_one_def:
       else Rejected
 End
 
-(* An instruction and its length in bytes, at most 15: legacy prefixes, at
-   most one of F2 and F3, then a REX byte, if any, right before the opcode. *)
+(* An instruction and its length in bytes, at most 15: prefixes, at most one
+   of F2 and F3, then the opcode; a REX byte counts only as the last prefix.
+   A VEX form after any REX byte is rejected, as QEMU does, rather than
+   reading a REX byte before other prefixes as ignored, as XED does. *)
 Definition decode_def:
   decode bytes =
-    let (prefixes, rest) = split_prefixes bytes;
+    let (prefixes, body) = split_prefixes bytes;
         p = LENGTH prefixes
     in
-      if has_prefix 0xF2w prefixes ∧ has_prefix 0xF3w prefixes then Rejected
+      if has_prefix 0xF2w prefixes ∧ has_prefix 0xF3w prefixes ∨
+         has_rex prefixes ∧ (case body of b::_ => b = 0xC4w | [] => F) then Rejected
       else
-        let (rex, body, r) =
-              (case rest of
-                 b::more => if b && 0xF0w = 0x40w then (b, more, 1n) else (0w, rest, 0)
-               | [] => (0w, rest, 0));
+        let rex = (case REVERSE prefixes of
+                     b::_ => if b && 0xF0w = 0x40w then b else 0w
+                   | [] => 0w);
             pf = <| opsize := has_prefix 0x66w prefixes;
                     rep := (if has_prefix 0xF3w prefixes then 0xF3w
                             else if has_prefix 0xF2w prefixes then 0xF2w else 0w);
@@ -1041,7 +1050,7 @@ Definition decode_def:
             [] => Truncated
           | op::more =>
               case decode_one pf op more of
-                Decoded i n => if p + r + n ≤ 15 then Decoded i (p + r + n) else Rejected
+                Decoded i n => if p + n ≤ 15 then Decoded i (p + n) else Rejected
               | other => other
 End
 

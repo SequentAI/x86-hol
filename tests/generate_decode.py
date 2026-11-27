@@ -38,6 +38,7 @@ STRING_OPS = {"movs": "MOVS", "cmps": "CMPS", "stos": "STOS", "lods": "LODS", "s
 FLAG_OPS = {"clc": "CLC", "stc": "STC", "cmc": "CMC", "cld": "CLD", "std": "STD"}
 LOOPS = {"loop": "LOOP", "loope": "LOOPE", "loopne": "LOOPNE", "jrcxz": "JRCXZ"}
 SIZES = {"b": "S8", "w": "S16", "l": "S32", "q": "S64"}
+LEGACY_PREFIXES = {0x66, 0xF2, 0xF3, 0x2E, 0x3E, 0x26, 0x36}
 BITS = {"S8": 8, "S16": 16, "S32": 32, "S64": 64}
 HIGH = ["ah", "ch", "dh", "bh"]
 PBINOPS = {"xorps": "PXOR", "pxor": "PXOR", "paddd": "PADDD", "paddq": "PADDQ", "pand": "PAND",
@@ -241,6 +242,16 @@ def instruction(d: Disassembled) -> str:
     return integer_instruction(d)
 
 
+def stack_size(raw: bytes) -> str:
+    """The operand size of LEAVE and ENTER: 16 bits with a 66 prefix and no
+    REX.W in the REX byte right before the opcode, else 64."""
+    n = 0
+    while raw[n] in LEGACY_PREFIXES or raw[n] & 0xF0 == 0x40:
+        n += 1
+    rex_w = n > 0 and raw[n - 1] & 0xF8 == 0x48
+    return "S16" if 0x66 in raw[:n] and not rex_w else "S64"
+
+
 def integer_instruction(d: Disassembled) -> str:
     """The model's general-purpose instruction for llvm-objdump's text."""
     m, ops = d.mnemonic, d.operands
@@ -254,7 +265,7 @@ def integer_instruction(d: Disassembled) -> str:
         return instruction(Disassembled(d.offset, d.length, inner, inner_ops, d.target, d.raw))
     if m[:-1] in STRING_OPS and m[-1] in SIZES and len(m) == 5:
         return f"StringOp {STRING_OPS[m[:-1]]} {SIZES[m[-1]]} NoRep"
-    stack = "S16" if d.raw[0] == 0x66 else "S64"
+    stack = stack_size(d.raw)
     if m in ("leave", "leaveq", "leavew"):
         return f"Leave {stack}"
     if m in ("enter", "enterq", "enterw"):
