@@ -29,8 +29,9 @@ the same length and it is not a near branch with a 66 prefix, which Intel
 and AMD CPUs execute differently. An iform is covered when HOL4 decodes
 every in-scope sample at that length as an instruction the iform's class
 allows (the HOL_FORMS table). A word HOL4 decodes is a mismatch when
-either reference rejects it, reads another length, or reads an
-instruction class the decoded instruction does not allow.
+either reference rejects it or reads another length, when XED reads an
+instruction class the decoded instruction does not allow, or when it is a
+66-prefixed near branch.
 
 XED is fetched at a pinned commit and built into a cache directory unless
 --xed names an installed XED kit; llvm-objcopy and llvm-objdump come from
@@ -41,6 +42,7 @@ Usage: x86_coverage.py [--xed DIR] [--llvm DIR] [--samples N] [--json FILE]
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import os
 import random
@@ -91,8 +93,10 @@ SEGMENT_IFORMS = {"MOV_GPRv_SEG", "MOV_MEMw_SEG", "MOV_SEG_GPR16", "MOV_SEG_MEMw
                   "PUSH_CS", "PUSH_DS", "PUSH_ES", "PUSH_FS", "PUSH_GS", "PUSH_SS"}
 
 
-def tier_of(iform: str, iclass: str, isa_set: str) -> tuple[str, str]:
+def tier_of(iform: str, iclass: str, isa_set: str, category: str) -> tuple[str, str]:
     """The tier of an iform, and why it is outside tier 1 if a tier-1 set has it."""
+    if category == "MMX":
+        return "out", "MMX"
     if iclass in CLASS_TIERS:
         return CLASS_TIERS[iclass], ""
     if iclass.endswith("_LOCK"):
@@ -123,7 +127,7 @@ PBINOPS = ["PXOR", "PADDD", "PADDQ", "PAND", "POR", "PCMPEQB", "PMULLD", "PMINUD
            "PAVGB", "PAVGW", "PADDUSB", "PSUBUSB", "PHMINPOSUW"]
 KEYED = {"Binop", "BinopImm", "Shift", "Rotate", "MulWide", "Div", "ShiftDouble", "Adx",
          "BitCount", "ShiftX", "Bls", "Pdep", "Jcc", "Cmov", "Setcc", "Pbinop", "Pcmpd",
-         "Pshufw", "Pshift", "Pshiftdq"}
+         "Pshufw", "Pshift", "Pshiftdq", "AesRound"}
 
 HOL_FORMS: dict[str, set[str]] = {
     "MovImm": {"MOV"}, "MovImm64": {"MOV"}, "Mov": {"MOV"},
@@ -150,7 +154,8 @@ HOL_FORMS: dict[str, set[str]] = {
     "Pshufw F": {"PSHUFLW"}, "Pshufb": {"PSHUFB"}, "Pshift T": {"PSLLD", "PSLLQ"},
     "Pshift F": {"PSRLD", "PSRLQ"}, "Psrad": {"PSRAD"}, "Pshiftdq T": {"PSLLDQ"},
     "Pshiftdq F": {"PSRLDQ"}, "PxorMem": {"PXOR"},
-    "AesRound": {"AESENC", "AESENCLAST", "AESDEC", "AESDECLAST"}, "AesImc": {"AESIMC"},
+    "AesRound AESENC": {"AESENC"}, "AesRound AESENCLAST": {"AESENCLAST"},
+    "AesRound AESDEC": {"AESDEC"}, "AesRound AESDECLAST": {"AESDECLAST"}, "AesImc": {"AESIMC"},
     "Pclmul": {"PCLMULQDQ"}, "AesKeygen": {"AESKEYGENASSIST"}, "Palignr": {"PALIGNR"},
     "Pinsrq": {"PINSRQ"}, "Pextrq": {"PEXTRQ"}, "Punpcklqdq": {"PUNPCKLQDQ"},
     "Pmovmskb": {"PMOVMSKB"}, "Movd": {"MOVD", "MOVQ"}, "MovqXmm": {"MOVQ"},
@@ -176,10 +181,14 @@ def hol_key(instruction: str) -> str:
 
 ESCAPES = {0x0F, 0xC4, 0xC5}
 LEGACY = {0x66, 0x67, 0xF2, 0xF3, 0xF0, 0x2E, 0x3E, 0x26, 0x36, 0x64, 0x65}
-PREFIX_SETS = [[], [0x66], [0xF2], [0xF3], [0x66, 0xF2], [0x66, 0xF3], [0xF2, 0x66],
-               [0xF3, 0x66], [0x2E], [0x3E, 0x66], [0x26, 0xF3], [0x36],
-               [0xF0], [0x64], [0x65], [0x67]]
-REXES = [None, 0x40, 0x41, 0x42, 0x44, 0x48, 0x4F]
+# Every order of at most one each of 66, F2 or F3, and a null segment
+# override; the prefixes of the rows below are swept alone.
+PREFIX_SETS = [list(order)
+               for choice in itertools.product([None, 0x66], [None, 0xF2, 0xF3],
+                                               [None, 0x2E, 0x3E, 0x26, 0x36])
+               for order in itertools.permutations(b for b in choice if b is not None)]
+PREFIX_SETS += [[0xF0], [0x64], [0x65], [0x67]]
+REXES = [None, *range(0x40, 0x50)]
 # A word's row: the prefixes that keep it from counting towards its iform.
 ROWS = {0xF0: "LOCK", 0x64: "FS/GS segment", 0x65: "FS/GS segment", 0x67: "address size"}
 
@@ -290,10 +299,13 @@ def sweep(probe: Path, rng: random.Random, iforms: dict[str, Iform]) -> None:
             for line in proc.stdout:
                 index, byte, length, name = line.split()
                 head = hs[int(index)]
+                if int(length) <= len(head) and byte != "00":
+                    continue  # the same word as with byte 00
                 word = (head + bytes([int(byte, 16)]) + tails[int(index)])[:int(length)]
                 iform = iforms[name]
-                iform.words += 1
-                group = (row_of(word), head[:-1], int(byte, 16) >> 6)
+                row = row_of(word)
+                iform.words += not row
+                group = (row, head[:-1], int(byte, 16) >> 6)
                 n = iform.seen[group]
                 iform.seen[group] += 1
                 kept = iform.groups.setdefault(group, [])
@@ -454,6 +466,7 @@ def main() -> None:
     if args.xed:
         kit = args.xed
     else:
+        args.cache = args.cache.resolve()
         args.cache.mkdir(parents=True, exist_ok=True)
         kit = xed_kit(args.cache)
     rng = random.Random(1)
@@ -462,8 +475,8 @@ def main() -> None:
         iforms = {}
         for line in subprocess.run([str(probe), "iforms"], capture_output=True, text=True,
                                    check=True).stdout.splitlines():
-            name, iclass, isa_set = line.split()
-            iforms[name] = Iform(name, iclass, isa_set, *tier_of(name, iclass, isa_set))
+            name, iclass, isa_set, category = line.split()
+            iforms[name] = Iform(name, iclass, isa_set, *tier_of(name, iclass, isa_set, category))
         sweep(probe, rng, iforms)
         rejected = rejected_words(probe, rng, args.rejected)
 
@@ -490,7 +503,9 @@ def main() -> None:
                 ("llvm-objdump rejects", l.length is None),
                 ("XED length", xed_length is not None and h.length != xed_length),
                 ("llvm-objdump length", l.length is not None and h.length != l.length),
-                ("class", iform is not None and iform.iclass not in allowed)) if bad]
+                ("class", iform is not None and iform.iclass not in allowed),
+                ("vendor-defined", iform is not None and vendor_defined(iform.iclass, word)))
+                if bad]
             if reasons:
                 mismatches.append({"word": word.hex(), "hol": h.text, "length": h.length,
                                    "xed": iform and iform.name, "llvm": l.text,
@@ -518,11 +533,14 @@ def main() -> None:
                        "decoded": c["decoded"], "state": state})
 
     reached = sum(r["state"] != "unreached" for r in report)
-    print(f"XED @ {XED_COMMIT[:12]}: {reached} of {len(iforms)} iforms reached, "
+    xed_commit = None if args.xed else XED_COMMIT
+    xed = f"XED @ {xed_commit[:12]}" if xed_commit else f"XED from {args.xed} (unpinned)"
+    print(f"{xed}: {reached} of {len(iforms)} iforms reached, "
           f"{len(words)} words decoded by HOL4 and llvm-objdump")
+    tiers = {tier: Counter(r["state"] for r in report if r["tier"] == tier)
+             for tier in ("1", "2", "3", "out")}
     print(f"{'tier':6} {'iforms':>7}" + "".join(f" {s:>9}" for s in STATES))
-    for tier in ("1", "2", "3", "out"):
-        t = Counter(r["state"] for r in report if r["tier"] == tier)
+    for tier, t in tiers.items():
         print(f"{tier:6} {sum(t.values()):7}" + "".join(f" {t[s]:9}" for s in STATES))
     gaps = [r for r in report if r["tier"] == "1" and r["state"] not in ("covered", "unreached")]
     if gaps:
@@ -537,7 +555,10 @@ def main() -> None:
         print(f"  {m['word']} {m['hol']} ({m['length']} bytes): {', '.join(m['reasons'])}; "
               f"XED {m['xed']}, llvm-objdump {m['llvm']}")
     if args.json:
-        args.json.write_text(json.dumps({"xed_commit": XED_COMMIT, "iforms": report,
+        args.json.write_text(json.dumps({"xed_commit": xed_commit,
+                                         "tiers": {t: {s: c[s] for s in STATES}
+                                                   for t, c in tiers.items()},
+                                         "iforms": report,
                                          "rows": per_row, "mismatches": mismatches},
                                         indent=1) + "\n")
 

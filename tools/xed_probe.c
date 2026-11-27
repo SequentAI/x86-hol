@@ -44,9 +44,10 @@ int main(int argc, char **argv) {
   if (strcmp(mode, "iforms") == 0) {
     for (int i = 1; i < XED_IFORM_LAST; i++) {
       xed_iform_enum_t f = (xed_iform_enum_t)i;
-      printf("%s %s %s\n", xed_iform_enum_t2str(f),
+      printf("%s %s %s %s\n", xed_iform_enum_t2str(f),
              xed_iclass_enum_t2str(xed_iform_to_iclass(f)),
-             xed_isa_set_enum_t2str(xed_iform_to_isa_set(f)));
+             xed_isa_set_enum_t2str(xed_iform_to_isa_set(f)),
+             xed_category_enum_t2str(xed_iform_to_category(f)));
     }
     return 0;
   }
