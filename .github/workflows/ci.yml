@@ -23,7 +23,7 @@ jobs:
 
       - uses: ./.github/actions/setup-holbuild
         with:
-          holbuild-ref: v0.15.15
+          holbuild-ref: v0.15.17
 
       - name: Build and check HOL theories
         run: |
