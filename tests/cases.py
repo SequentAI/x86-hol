@@ -2973,7 +2973,7 @@ class CaseBuilder:
         # VEX.R is ignored where ModRM.reg is an opcode extension, and so is
         # ModRM.reg in SETcc. (ADOX with a 66 prefix too is ADOX, but QEMU
         # runs it as ADCX, so it has no case here.)
-        self.add("blsr with VEX.R set", bytes.fromhex("c462f0f3c8"))
+        self.add("blsr with VEX.R set", bytes.fromhex("c462f0f3c8"), undefined=AF | PF)
         self.add("setb with ModRM.reg 3", bytes.fromhex("0f92d8"))
 
 
